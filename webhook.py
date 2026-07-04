@@ -21,13 +21,17 @@ logger = logging.getLogger("webhook")
 
 # --- LIGHTWEIGHT SECRETS LOADER ---
 def load_streamlit_secrets():
-    """Manually parses secrets.toml to bypass loading Streamlit's engine."""
+    """Manually parses secrets.toml, falling back to root directory for Render compatibility."""
     secrets = {}
     current_section = None
+    
+    # ✨ FIX: Check both local .streamlit subdirectory and Render's root directory [1]
     secrets_path = os.path.join(".streamlit", "secrets.toml")
+    if not os.path.exists(secrets_path):
+        secrets_path = "secrets.toml"  # Fallback to Render's root secret file path [1]
     
     if not os.path.exists(secrets_path):
-        logger.error(f"Secrets file not found at: {secrets_path}")
+        logger.error(f"Secrets file not found at local or root paths.")
         return None
         
     try:
@@ -45,6 +49,7 @@ def load_streamlit_secrets():
                     val = val.strip().strip('"').strip("'")
                     if current_section:
                         secrets[current_section][key] = val
+        logger.info(f"Successfully loaded configuration from: {secrets_path}")
         return secrets
     except Exception as e:
         logger.error(f"Failed parsing secrets file: {e}")
@@ -67,7 +72,7 @@ if "tlsAllowInvalidCertificates" not in MONGO_URI:
 
 # --- DATABASE & STORAGE CONNECTIONS ---
 try:
-    mongo_client = MongoClient(MONGO_URI)
+    mongo_client = MongoClient(MONGO_URI, tls=True, tlsAllowInvalidCertificates=True)
     db = mongo_client[MONGO_DBNAME]
     
     s3_client = boto3.client(
@@ -117,7 +122,7 @@ def shorten_url(long_url: str) -> str:
 def process_single_segment(segment_text: str):
     """
     Parses a single segment of a query (e.g. 'FETCH 101 102 103 OF POLICY').
-    Returns a tuple of (list of matched MongoDB records, list of requested employee IDs).
+    Returns a list of matching MongoDB metadata records.
     """
     segment_text = segment_text.strip().upper()
     if not segment_text.startswith("FETCH"):
@@ -125,7 +130,7 @@ def process_single_segment(segment_text: str):
         
     parts = segment_text.split()
     if len(parts) < 2:
-        return [], []
+        return []
         
     # Detect conversational connectors
     connector_idx = None
@@ -163,7 +168,7 @@ def process_single_segment(segment_text: str):
         if ecard_record:
             records.append(ecard_record)
             
-    return records, emp_ids
+    return records
 
 @app.post("/whatsapp")
 async def handle_incoming_whatsapp(
@@ -177,7 +182,7 @@ async def handle_incoming_whatsapp(
     sender_phone = From.strip().lower()
     raw_body = Body.strip().upper()
     
-    # ✨ FIX: Detect and strip out the keyword 'ZIP' first so it never pollutes the policy name parsing [1]
+    # Detect and strip out the keyword 'ZIP' first so it never pollutes the policy name parsing [1]
     is_zip_forced = False
     if "ZIP" in raw_body:
         is_zip_forced = True
@@ -227,7 +232,6 @@ async def handle_incoming_whatsapp(
         return xml_response("❌ No matching e-cards could be located in the database for your query.")
         
     # 4. CHOOSE DISPATCH MODE (Auto-ZIP vs. Individual)
-    # ✨ FIX: Decisions are now made based on how many IDs were REQUESTED (not found), or if ZIP is forced [1]
     is_zip_request = len(total_requested_ids) > 3 or is_zip_forced
     
     if is_zip_request:
