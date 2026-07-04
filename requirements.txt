@@ -1,0 +1,10 @@
+streamlit>=1.30.0
+PyMuPDF>=1.23.0
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+pandas>=2.0.0
+psycopg2-binary>=2.9.9
+paddlepaddle>=2.5.0
+paddleocr>=2.7.0
+pydantic>=2.5.0
+Werkzeug>=3.0.0
