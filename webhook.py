@@ -25,7 +25,7 @@ def load_streamlit_secrets():
     secrets = {}
     current_section = None
     
-    # ✨ FIX: Check both local .streamlit subdirectory and Render's root directory [1]
+    # Check both local .streamlit subdirectory and Render's root directory [1]
     secrets_path = os.path.join(".streamlit", "secrets.toml")
     if not os.path.exists(secrets_path):
         secrets_path = "secrets.toml"  # Fallback to Render's root secret file path [1]
@@ -72,7 +72,7 @@ if "tlsAllowInvalidCertificates" not in MONGO_URI:
 
 # --- DATABASE & STORAGE CONNECTIONS ---
 try:
-    mongo_client = MongoClient(MONGO_URI, tls=True, tlsAllowInvalidCertificates=True)
+    mongo_client = MongoClient(MONGO_URI)
     db = mongo_client[MONGO_DBNAME]
     
     s3_client = boto3.client(
@@ -122,7 +122,7 @@ def shorten_url(long_url: str) -> str:
 def process_single_segment(segment_text: str):
     """
     Parses a single segment of a query (e.g. 'FETCH 101 102 103 OF POLICY').
-    Returns a list of matching MongoDB metadata records.
+    Returns a tuple of (list of matching MongoDB records, list of requested employee IDs).
     """
     segment_text = segment_text.strip().upper()
     if not segment_text.startswith("FETCH"):
@@ -130,7 +130,7 @@ def process_single_segment(segment_text: str):
         
     parts = segment_text.split()
     if len(parts) < 2:
-        return []
+        return [], []
         
     # Detect conversational connectors
     connector_idx = None
@@ -168,7 +168,8 @@ def process_single_segment(segment_text: str):
         if ecard_record:
             records.append(ecard_record)
             
-    return records
+    # ✨ FIX: Correctly return BOTH matching records and the requested IDs to allow unpacking
+    return records, emp_ids
 
 @app.post("/whatsapp")
 async def handle_incoming_whatsapp(
