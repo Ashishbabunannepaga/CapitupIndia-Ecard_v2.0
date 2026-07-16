@@ -865,7 +865,7 @@ with main_tab3:
                             
                             # Save with corporate hierarchical directory structures
                             save_card_to_db(emp_id, pdf_bytes, st.session_state.username, employee_metadata[emp_id], p_no, card_type, comp_name)
-                            zip_file.writestr(f"{emp_id}_{card_type}_ECard.pdf", pdf_bytes)
+                            zip_file.writestr(f"{emp_id}_ECard.pdf", pdf_bytes)
                             out_pdf.close()
                             
                     st.session_state.zip_data = zip_buffer.getvalue()
