@@ -16,3 +16,4 @@ certifi>=2024.2.2
 python-multipart>=0.0.18
 pydantic>=2.5.0
 Werkzeug>=3.0.0
+pillow-heif
