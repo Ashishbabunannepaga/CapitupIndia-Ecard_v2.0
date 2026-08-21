@@ -31,9 +31,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 
-# --- Import Modern Google GenAI SDK ---
-from google import genai
-from google.genai import types, errors
+
 
 # --- SUPPRESS AI & C++ NOISE ---
 os.environ["GLOG_minloglevel"] = "3"   
