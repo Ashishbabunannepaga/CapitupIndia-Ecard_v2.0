@@ -753,7 +753,7 @@ with main_tab3:
                         comp_name = target_company.strip().upper() if target_company else (getattr(group["metadata"][0], 'company_name', None) or "GENERAL_CORP")
                         
                         save_card_to_db(eid, merged_bytes, st.session_state.username, group["metadata"], p_no, card_type, comp_name)
-                        save_name = f"{eid}_ECard.pdf" if opt_rename else f"Processed_Family_{eid}.pdf"
+                        save_name = f"{eid}_ECard.pdf" if opt_rename else f"Processed_{eid}.pdf"
                         zip_file.writestr(save_name, merged_bytes)
                         processed_count += 1
                         
@@ -791,7 +791,7 @@ with main_tab3:
                     for err in mismatches: st.text(err)
 
     if st.session_state.get('zip_data'):
-        st.download_button("📥 Download Final PDF Output (.zip)", data=st.session_state.zip_data, file_name="Processed_ECards_Archive.zip", mime="application/zip", type="primary", use_container_width=True)
+        st.download_button("📥 Download Final PDF Output (.zip)", data=st.session_state.zip_data, file_name=f"{clean_comp_preview}_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
 
 # --- TAB 5: SEARCH INDIVIDUAL ---
 with main_tab5:
