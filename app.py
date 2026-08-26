@@ -429,8 +429,8 @@ if st.sidebar.button("Logout", type="primary", use_container_width=True):
 st.title("🪪 CapitUp India E-Card Database Portal")
 
 main_tab1, main_tab4, main_tab2, main_tab3, main_tab5, main_tab6, main_tab7, main_tab8 = st.tabs([
-    "📥 Ingest E-Cards", "📥 Bulk Retrieval", "📊 Global Directory", 
-    "📤 Universal Processing", "🔍 Search Individual", "✉️ Email Distribution", "🧬 Familyfication",
+    "📤 Universal Processing","📥 Ingest E-Cards", "📥 Bulk Retrieval", "📊 Global Directory", 
+    "🔍 Search Individual", "✉️ Email Distribution", "🧬 Familyfication",
     "🔍 Coverage Gap Finder"
 ])
 
@@ -438,7 +438,7 @@ ocr_engine = load_ocr_engine()
 db = get_db()
 
 # --- TAB 1: MODULAR INGESTION SYSTEM ---
-with main_tab1:
+with main_tab2:
     col_base_module, col_topup_module = st.columns(2)
     with col_base_module:
         st.markdown("<div style='border: 1px solid #0d6efd; padding: 15px; border-radius: 8px; background-color: #f8f9fa;'>", unsafe_allow_html=True)
@@ -603,7 +603,7 @@ with main_tab2:
         st.dataframe(df_all, hide_index=True, use_container_width=True)
 
 # --- TAB 4: UNIVERSAL PROCESSING & SMART ROUTING ---
-with main_tab3:
+with main_tab1:
     st.markdown("### 🛠️ Universal E-Card Ingestion Engine")
     st.markdown("Upload **Master PDFs** or **Individual Cards**. Configure the corporate routing metadata and select processing logic.")
     
