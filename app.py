@@ -428,9 +428,9 @@ if st.sidebar.button("Logout", type="primary", use_container_width=True):
 
 st.title("🪪 CapitUp India E-Card Database Portal")
 
-main_tab1, main_tab4, main_tab2, main_tab3, main_tab5, main_tab6, main_tab7, main_tab8 = st.tabs([
+main_tab1, main_tab4, main_tab2, main_tab3, main_tab5, main_tab6,  main_tab8 = st.tabs([
     "📤 Universal Processing","📥 Ingest E-Cards", "📥 Bulk Retrieval", "📊 Global Directory", 
-    "🔍 Search Individual", "✉️ Email Distribution", "🧬 Familyfication",
+    "🔍 Search Individual", "✉️ Email Distribution",
     "🔍 Coverage Gap Finder"
 ])
 
