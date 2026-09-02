@@ -987,18 +987,14 @@ with tab_search:
                 preview_doc.close()
         else: st.error("No E-Card found.")
 
+
+
 # ==============================================================================
-# --- TAB 6: EMAIL DISTRIBUTION AGENT ---
-# ==============================================================================
-# ==============================================================================
-# --- TAB 6: EMAIL DISTRIBUTION AGENT ---
-# ==============================================================================
-# ==============================================================================
-# --- TAB 6: EMAIL DISTRIBUTION AGENT (WITH SMART QUEUE FILTERING) ---
+# --- TAB 6: EMAIL DISTRIBUTION AGENT (WITH PROMINENT FORM CONTROLLER) ---
 # ==============================================================================
 with tab_email:
     st.markdown("### ✉️ Email Dispatch Center")
-    st.markdown("Configure corporate assets and automate welcome email dispatch for active employees.")
+    st.markdown("Configure corporate assets, manage correction form response windows, and dispatch welcome emails.")
     
     policies_registered = db.ecards.distinct("policy_no")
     if not policies_registered: policies_registered = ["No Clients Ingested"]
@@ -1010,6 +1006,7 @@ with tab_email:
     col_left_layout, col_right_layout = st.columns([1.2, 1])
 
     with col_left_layout:
+        # --- SECTION 1: INSURER ASSET VAULT ---
         st.subheader("⚙️ Insurer Asset Vault (Cloud-Native)")
         col_vault1, col_vault2, col_vault3 = st.columns(3) 
         
@@ -1056,9 +1053,112 @@ with tab_email:
             st.markdown("</div>", unsafe_allow_html=True)
 
         st.divider()
+
+        # --- SECTION 2: PROMINENT GOOGLE CORRECTION FORM CONTROLLER ---
+        st.subheader("📝 E-Card Correction Window Controller")
+        st.caption("Control live response acceptance for the correction Google Form and set auto-closing deadlines.")
+
+        gas_setting = db.settings.find_one({"key": "gas_url"})
+        stored_gas_url = gas_setting["value"] if gas_setting else DEFAULT_GAS_URL
+        
+        with st.expander("⚙️ Google Apps Script Endpoint URL Configuration", expanded=False):
+            gas_url_input = st.text_input("Google Apps Script Web App URL:", value=stored_gas_url, key="t6_gas_url_field")
+            if gas_url_input != stored_gas_url:
+                db.settings.update_one({"key": "gas_url"}, {"$set": {"key": "gas_url", "value": gas_url_input.strip()}}, upsert=True)
+                st.success("Google Apps Script URL saved!")
+                time.sleep(0.5)
+                st.rerun()
+
+        # Check Live Form Status
+        current_form_status = get_form_status(stored_gas_url) if stored_gas_url else "DISCONNECTED"
+        active_deadline_text = get_deadline_from_db(selected_client_policy)
+        
+        # Auto-update status if expired
+        if current_form_status == "CLOSED" and active_deadline_text not in ["Form Closed", "Expired / Closed", "Not Set"]:
+            save_deadline_to_db(selected_client_policy, "Expired / Closed")
+            active_deadline_text = "Expired / Closed"
+
+        # RENDER STATUS CARD
+        st.markdown("<div style='background-color: #f8f9fa; border: 1px solid #ced4da; padding: 15px; border-radius: 8px; margin-bottom: 15px;'>", unsafe_allow_html=True)
+        col_stat1, col_stat2 = st.columns(2)
+        with col_stat1:
+            if current_form_status == "OPEN":
+                st.markdown("Live Form Status: **🟢 OPEN (Accepting Responses)**")
+            elif current_form_status == "CLOSED":
+                st.markdown("Live Form Status: **🔴 CLOSED (Submissions Shut)**")
+            else:
+                st.markdown(f"Live Form Status: **⚠️ {current_form_status}**")
+        with col_stat2:
+            st.markdown(f"⏱️ Active Window Closes: **{active_deadline_text}**")
+            
+        st.markdown("---")
+        
+        col_dur, col_btns = st.columns([1.2, 1.8])
+        with col_dur:
+            deadline_option = st.selectbox(
+                "Set Response Window:",
+                ["1 Day (24 hrs)", "3 Days (72 hrs)", "1 Week (7 Days)", "10 Days", "2 Weeks (14 Days)", "Manual Open (No Timer)"],
+                key="t6_deadline_select"
+            )
+        with col_btns:
+            st.text("") # vertical align spacer
+            c_btn_open, c_btn_close = st.columns(2)
+            
+            with c_btn_open:
+                if st.button("🟢 Open Form", use_container_width=True, type="primary", key="btn_open_gform"):
+                    if not stored_gas_url:
+                        st.error("Please configure the Google Apps Script Web App URL above.")
+                    elif deadline_option == "Manual Open (No Timer)":
+                        res = set_form_status(stored_gas_url, "open")
+                        if res:
+                            save_deadline_to_db(selected_client_policy, "Manual Close Required")
+                            st.success("Google Form is now OPEN (Manual close required).")
+                            time.sleep(1)
+                            st.rerun()
+                    else:
+                        duration_mapping = {
+                            "1 Day (24 hrs)": 24.0,
+                            "3 Days (72 hrs)": 72.0,
+                            "1 Week (7 Days)": 168.0,
+                            "10 Days": 240.0,
+                            "2 Weeks (14 Days)": 336.0
+                        }
+                        target_hours = duration_mapping[deadline_option]
+                        with st.spinner("Communicating with Google Apps Script..."):
+                            response_text = schedule_form_close(stored_gas_url, target_hours)
+                            
+                            if response_text and "SCHEDULED_FOR_" in response_text:
+                                iso_str = response_text.replace("SCHEDULED_FOR_", "")
+                                utc_datetime = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+                                local_datetime = utc_datetime + timedelta(hours=5, minutes=30)
+                                formatted_deadline_str = local_datetime.strftime("%B %d, %Y at %I:%M %p (IST)")
+                                
+                                save_deadline_to_db(selected_client_policy, formatted_deadline_str)
+                                st.success(f"Form OPENED and scheduled to close on: {formatted_deadline_str}")
+                                time.sleep(1.5)
+                                st.rerun()
+                            else:
+                                st.error(f"Failed to communicate with Google Form API: {response_text}")
+                                
+            with c_btn_close:
+                if st.button("🔴 Close Form", use_container_width=True, key="btn_close_gform"):
+                    if not stored_gas_url:
+                        st.error("Please configure the Google Apps Script Web App URL above.")
+                    else:
+                        with st.spinner("Closing Google Form..."):
+                            res = set_form_status(stored_gas_url, "close")
+                            if res:
+                                save_deadline_to_db(selected_client_policy, "Form Closed")
+                                st.warning("Google Form is now CLOSED to responses!")
+                                time.sleep(1.5)
+                                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.divider()
+
+        # --- SECTION 3: EMAIL ARCHITECT & TEMPLATE ---
         st.subheader("✉️ Email Architect")
         subject_line_input = st.text_input("SUBJECT LINE", value="Your Health Insurance E-Card & Welcome Kit")
-        active_deadline_text = get_deadline_from_db(selected_client_policy)
         
         logo_tag_component = ""
         if get_asset("logo"):
@@ -1174,7 +1274,7 @@ with tab_email:
         st.subheader("👥 Pending Enrollment")
         st.markdown("Active users missing a welcome email.")
 
-        # --- UPGRADED: RESILIENT DROPDOWN COLUMN MAPPER ---
+        # --- SECTION 4: RESILIENT DIRECTORY MAPPING UPLOADER ---
         st.markdown("<div style='background-color:#f0f2f6; padding:15px; border-radius:6px; border:1px solid #ddd;'>", unsafe_allow_html=True)
         t6_mapping_file = st.file_uploader("📥 Upload Client Mapping Directory (CSV/Excel)", type=["csv", "xlsx", "xls"], key="t6_mapping_uploader")
         
@@ -1223,7 +1323,6 @@ with tab_email:
                             if raw_emp_id.endswith('.0'): raw_emp_id = raw_emp_id[:-2]
                             raw_name = str(row[name_col_map]).strip()
                             
-                            # SANITIZE 'nan' TO CLEAN EMPTY STRING
                             raw_email = str(row[email_col_map]).strip().lower()
                             if raw_email in ["nan", "none", "null", "undefined", ""]: raw_email = ""
                             
@@ -1249,7 +1348,7 @@ with tab_email:
 
         st.divider()
         
-        # --- QUERY PENDING CARDS & CATEGORIZE QUEUE ---
+        # --- SECTION 5: SMART QUEUE DISPATCHER ---
         pending_ecards = list(db.ecards.find({"policy_no": selected_client_policy, "email_sent": {"$ne": True}}))
         
         ready_to_send_jobs = []
@@ -1276,7 +1375,6 @@ with tab_email:
             else:
                 missing_email_jobs.append(job_item)
 
-        # RENDER METRICS SUMMARY
         m_q1, m_q2 = st.columns(2)
         m_q1.metric("🟢 Ready to Dispatch", len(ready_to_send_jobs))
         m_q2.metric("⚠️ Missing Email / Incomplete", len(missing_email_jobs))
@@ -1290,11 +1388,9 @@ with tab_email:
         st.divider()
         st.subheader("✉️ Process Mail Queue")
         
-        # BATCH SIZE SELECTOR (BASED ON READY-TO-SEND LIST)
         batch_limit = st.number_input("Batch Run Limit", min_value=1, max_value=500, value=min(20, max(1, len(ready_to_send_jobs))), step=1)
         jobs_to_process = min(len(ready_to_send_jobs), batch_limit)
         
-        # BUTTON PROCESSES ONLY VALID EMAILS!
         if st.button(f"▶️ Process {jobs_to_process} Ready Jobs", type="primary", use_container_width=True, disabled=(jobs_to_process == 0)):
             sent_success_count = 0
             smtp_errors = []
@@ -1303,7 +1399,6 @@ with tab_email:
             progress_bar = st.progress(0)
             status_update = st.empty()
             
-            # LOOP OVER ONLY VALID READY JOBS!
             for idx, job in enumerate(ready_to_send_jobs[:jobs_to_process]):
                 emp_id = job["EMP ID"]
                 recipient_email = job["_clean_email"]
@@ -1348,20 +1443,8 @@ with tab_email:
             st.rerun()
 
         st.divider()
+        # --- SECTION 6: ADMIN RE-QUEUE TESTING CONTROLS ---
         with st.expander("🛠️ Admin Testing & Queue Controls", expanded=False):
-            gas_setting = db.settings.find_one({"key": "gas_url"})
-            stored_gas_url = gas_setting["value"] if gas_setting else ""
-            gas_url_input = st.text_input("Google Apps Script Web App URL:", value=stored_gas_url)
-            
-            if gas_url_input != stored_gas_url:
-                db.settings.update_one({"key": "gas_url"}, {"$set": {"key": "gas_url", "value": gas_url_input}}, upsert=True)
-                st.success("Google Apps Script URL securely saved!"); time.sleep(0.5); st.rerun()
-                
-            if gas_url_input:
-                current_form_status = get_form_status(gas_url_input)
-                st.markdown(f"Live Form Status: **{current_form_status}**")
-            
-            st.divider()
             col_admin_input, col_admin_btn = st.columns([2, 1])
             reset_target_id = col_admin_input.text_input("Target Employee ID to Re-queue:")
             if col_admin_btn.button("🔄 Re-queue", use_container_width=True) and reset_target_id:
@@ -1371,7 +1454,11 @@ with tab_email:
             if st.button("🚨 Re-queue All Users in Selected Campaign", type="secondary", use_container_width=True):
                 db.ecards.update_many({"policy_no": selected_client_policy}, {"$set": {"email_sent": False}})
                 st.success("All users re-queued!"); time.sleep(1); st.rerun()
-                
+
+
+
+
+# ==============================================================================
 # --- TAB 7: LIGHTNING-FAST FILENAME-BASED FAMILYFICATION ---
 # ==============================================================================
 with tab_family:
