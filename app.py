@@ -293,6 +293,7 @@ def delete_asset(asset_name):
     get_db().assets.delete_one({"name": asset_name})
 
 # --- SMTP EMAIL DISPATCH ENGINE ---
+# --- SMTP EMAIL DISPATCH ENGINE (WITH EXPLICIT ERROR REPORTING) ---
 def send_multi_ecard_email(recipient_email, subject, body_html, cards_list):
     try:
         SMTP_CONFIG = st.secrets["smtp"]
@@ -338,18 +339,17 @@ def send_multi_ecard_email(recipient_email, subject, body_html, cards_list):
             
         port = int(SMTP_CONFIG["port"])
         if port == 465:
-            with smtplib.SMTP_SSL(SMTP_CONFIG["server"], port, timeout=120) as server:
+            with smtplib.SMTP_SSL(SMTP_CONFIG["server"], port, timeout=30) as server:
                 server.login(SMTP_CONFIG["username"], SMTP_CONFIG["password"])
                 server.sendmail(SMTP_CONFIG["username"], recipient_email, msg.as_string())
         else:
-            with smtplib.SMTP(SMTP_CONFIG["server"], port, timeout=120) as server:
+            with smtplib.SMTP(SMTP_CONFIG["server"], port, timeout=30) as server:
                 server.ehlo(); server.starttls(); server.ehlo()
                 server.login(SMTP_CONFIG["username"], SMTP_CONFIG["password"])
                 server.sendmail(SMTP_CONFIG["username"], recipient_email, msg.as_string())
-        return True
+        return True, None
     except Exception as e:
-        return False
-
+        return False, str(e)
 # --- EXTRACTION BOUNDARY LOGIC ---
 def detect_card_boundaries(page):
     try:
@@ -745,7 +745,7 @@ with tab_universal:
                         comp_name = target_company.strip().upper() if target_company else (getattr(group["metadata"][0], 'company_name', None) or "GENERAL_CORP")
                         
                         save_card_to_db(eid, merged_bytes, st.session_state.username, group["metadata"], p_no, card_type, comp_name)
-                        save_name = f"{eid}_ECard.pdf" if opt_rename else f"{eid}.pdf"
+                        save_name = f"{eid}_ECard.pdf" if opt_rename else f"Processed_Family_{eid}.pdf"
                         zip_file.writestr(save_name, merged_bytes)
                         processed_count += 1
                         
@@ -783,7 +783,7 @@ with tab_universal:
                     for err in mismatches: st.text(err)
 
     if st.session_state.get('zip_data'):
-        st.download_button("📥 Download Final PDF Output (.zip)", data=st.session_state.zip_data, file_name=f"{clean_comp_preview}_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
+        st.download_button("📥 Download Final PDF Output (.zip)", data=st.session_state.zip_data, file_name="Processed_ECards_Archive.zip", mime="application/zip", type="primary", use_container_width=True)
 
 # ==============================================================================
 # --- TAB 2: MODULAR INGESTION SYSTEM ---
@@ -990,6 +990,12 @@ with tab_search:
 # ==============================================================================
 # --- TAB 6: EMAIL DISTRIBUTION AGENT ---
 # ==============================================================================
+# ==============================================================================
+# --- TAB 6: EMAIL DISTRIBUTION AGENT ---
+# ==============================================================================
+# ==============================================================================
+# --- TAB 6: EMAIL DISTRIBUTION AGENT (WITH SMART QUEUE FILTERING) ---
+# ==============================================================================
 with tab_email:
     st.markdown("### ✉️ Email Dispatch Center")
     st.markdown("Configure corporate assets and automate welcome email dispatch for active employees.")
@@ -1056,20 +1062,27 @@ with tab_email:
         
         logo_tag_component = ""
         if get_asset("logo"):
-            logo_tag_component = """<div style="text-align: center; margin-bottom: 15px;"><img src="cid:logo_image" alt="CapitUp India Logo" style="height: 60px; width: auto; display: inline-block;" /></div>"""
+            logo_tag_component = """
+            <div style="text-align: center; margin-bottom: 15px;">
+              <img src="cid:logo_image" alt="CapitUp India Logo" style="height: 60px; width: auto; display: inline-block;" />
+            </div>
+            """
         
         brand_html_template = f"""<div style="font-family: 'Segoe UI', Arial, sans-serif; color: #333; line-height: 1.6; max-width: 650px; margin: 0 auto; border: 1px solid #C29B38; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.05); background-color: #ffffff;">
+  <!-- CapitUp India Official Branded Header -->
   <div style="background-color: #0B1E30; padding: 28px 24px; text-align: center; border-bottom: 3px solid #C29B38; position: relative;">
     {logo_tag_component}
     <h2 style="color: #ffffff; margin: 0; font-size: 22px; letter-spacing: 1px; font-weight: 800; text-transform: uppercase;">CAPITUP INDIA</h2>
     <p style="color: #C29B38; margin: 5px 0 0 0; font-size: 11px; font-weight: bold; letter-spacing: 2px;">YOUR SECURE EMPLOYEE BENEFITS PARTNER</p>
   </div>
   
+  <!-- Email Content Area -->
   <div style="padding: 32px 24px;">
     <p style="font-size: 15px; margin-top: 0;">Dear <strong>{{{{name}}}}</strong>,</p>
     <p style="font-size: 14px; font-style: italic; color: #555;">Greetings..!</p>
-    <p style="font-size: 14px;">We are pleased to inform you that your Group Mediclaim Insurance coverage has been updated.</p>
+    <p style="font-size: 14px;">We are pleased to welcome you to the <strong>CapitUp India</strong> ecosystem. Your Group Health Insurance policy with <strong>Bajaj Allianz General Insurance Company</strong> is active for the period <strong>26-May-2026 to 25-May-2027</strong>.</p>
     <p style="font-size: 14px;">Please find attached your Health Cards / E-Cards and the policy coverage details for your reference.</p>
+    <p style="font-size: 14px; font-weight: 500; color: #0B1E30;">The login credentials for accessing the Bajaj Allianz portal will be shared shortly.</p>
     
     <div style="background-color: #F4F6F8; border-left: 4px solid #C29B38; padding: 14px; margin: 20px 0; border-radius: 4px;">
       <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
@@ -1084,6 +1097,47 @@ with tab_email:
       </table>
     </div>
 
+    <!-- Cashless Hospitalization Process Section -->
+    <div style="border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; margin: 24px 0; background-color: #ffffff;">
+      <h3 style="margin-top: 0; color: #0B1E30; font-size: 15px; border-bottom: 2px solid #23C2A9; padding-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">🏥 Cashless Hospitalization Process</h3>
+      <p style="font-size: 13px; margin: 8px 0;">In case of planned or emergency hospitalization, kindly follow the steps below:</p>
+      <ol style="font-size: 13px; padding-left: 20px; margin: 10px 0; color: #555;">
+        <li style="margin-bottom: 8px;">Identify a network hospital from the official locator list available here: <br/>
+          <a href="https://www.bajajallianz.com/branch-locator.html" target="_blank" style="color: #23C2A9; font-weight: bold; text-decoration: none;">Bajaj Allianz Hospital Locator</a>
+        </li>
+        <li style="margin-bottom: 8px;">At the hospital insurance desk, please provide the following verifications:
+          <ul style="padding-left: 15px; margin-top: 4px; list-style-type: circle;">
+            <li>Health Card / E-Card</li>
+            <li>Aadhaar Card</li>
+            <li>Employee ID Card</li>
+          </ul>
+        </li>
+        <li>The hospital desk will coordinate directly with Bajaj Allianz to initiate the cashless authorization process.</li>
+      </ol>
+    </div>
+
+    <!-- Reimbursement Claim Documents Section -->
+    <div style="border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; margin: 24px 0; background-color: #ffffff;">
+      <h3 style="margin-top: 0; color: #0B1E30; font-size: 15px; border-bottom: 2px solid #C29B38; padding-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">📋 Reimbursement Claim Documents</h3>
+      <p style="font-size: 13px; margin: 8px 0;">In case of reimbursement claims, kindly upload the documents through the Bajaj Allianz portal or share a single compiled PDF file (under 10 MB) with our team at <a href="mailto:syamala.g@capitupindia.com" style="color: #23C2A9; font-weight: bold; text-decoration: none;">syamala.g@capitupindia.com</a> or <a href="mailto:claims@capitupindia.com" style="color: #23C2A9; font-weight: bold; text-decoration: none;">claims@capitupindia.com</a>.</p>
+      <p style="font-size: 13px; font-weight: bold; margin-bottom: 6px; color: #0B1E30;">Please ensure that the following documents are submitted:</p>
+      <ul style="font-size: 12px; padding-left: 20px; margin: 0; color: #555; line-height: 1.5;">
+        <li style="margin-bottom: 4px;"><strong>Claim Form Part-A (attached):</strong> Checklist duly filled and signed by the employee.</li>
+        <li style="margin-bottom: 4px;"><strong>Claim Form Part-B (attached):</strong> Duly completed with hospital stamp and authorized signature.</li>
+        <li style="margin-bottom: 4px;">Original detailed discharge summary with hospital stamp and signature (including date and time).</li>
+        <li style="margin-bottom: 4px;">Original final bill with hospital stamp and signature (including date and time).</li>
+        <li style="margin-bottom: 4px;">Original payment receipts corresponding to the final bill.</li>
+        <li style="margin-bottom: 4px;">Original pharmacy bills with stamp and signature.</li>
+        <li style="margin-bottom: 4px;">Original diagnostic/laboratory reports and X-Ray/Scan reports with payment receipts, if applicable.</li>
+        <li style="margin-bottom: 4px;">Original prescription of the first consultation and previous consultation records, if any.</li>
+        <li style="margin-bottom: 4px;">Copy of Patient Health ID Card & Aadhaar Card.</li>
+        <li style="margin-bottom: 4px;">Copy of Employee PAN Card & Employee ID Card.</li>
+        <li style="margin-bottom: 4px;">Copy of Employee's cancelled cheque leaf (with printed Name, Account Number and IFSC) or the first page of the bank passbook.</li>
+        <li style="margin-bottom: 4px;">Employee contact details (mobile number, email ID, and address).</li>
+      </ul>
+    </div>
+
+    <!-- Call to Actions & dynamic Correction Google Form Pre-fill Link -->
     <div style="text-align: center; margin: 32px 0 16px 0;">
       <a href="https://docs.google.com/forms/d/e/1FAIpQLSfMZ0SHY4pr9NVfZwHQRhU6Jmy-vN2K8INePRdkYQarVA_EMw/viewform?usp=pp_url&entry.877007954={{{{name}}}}&entry.863990631={{{{emp_id}}}}&entry.1115400795={{{{policy_no}}}}" 
          style="background-color: #23C2A9; color: #ffffff; padding: 14px 28px; text-decoration: none; font-size: 13px; font-weight: bold; border-radius: 6px; display: inline-block; box-shadow: 0 4px 10px rgba(35, 194, 169, 0.25); border: 1px solid #1fa895; transition: background-color 0.2s;">
@@ -1093,7 +1147,11 @@ with tab_email:
       <p style="color: #C29B38; font-size: 11px; font-weight: bold; margin-top: 6px;">⏱️ Correction Form Window Closes On: {{{{deadline}}}}</p>
     </div>
   </div>
+
+  <!-- Dynamic Poster Attachment Hook -->
   <!-- FOOTER -->
+
+  <!-- CapitUp India Corporate Footer with Logo Signature Mark -->
   <div style="background-color: #F4F6F8; padding: 24px; text-align: center; border-top: 1px solid #e5e7eb;">
     <p style="margin: 0; font-size: 12px; color: #0B1E30; font-weight: bold;">Thank you for being part of the CapitUp Family</p>
     <p style="margin: 4px 0 0 0; font-size: 10px; color: #888;">CapitUp India Pvt. Ltd. | 4th Floor, HUDA Techno Enclave, HITEC City, Hyderabad-500081</p>
@@ -1103,7 +1161,7 @@ with tab_email:
   </div>
 </div>"""
         
-        html_body_input = st.text_area("HTML BODY TEMPLATE", value=brand_html_template, height=250)
+        html_body_input = st.text_area("HTML BODY TEMPLATE (VARIABLES: {{name}}, {{emp_id}}, {{policy_no}}, {{deadline}})", value=brand_html_template, height=250)
         
         if st.checkbox("👁️ Toggle Live Preview", key="live_prev"):
             st.markdown("#### Live Preview Frame")
@@ -1116,102 +1174,177 @@ with tab_email:
         st.subheader("👥 Pending Enrollment")
         st.markdown("Active users missing a welcome email.")
 
+        # --- UPGRADED: RESILIENT DROPDOWN COLUMN MAPPER ---
         st.markdown("<div style='background-color:#f0f2f6; padding:15px; border-radius:6px; border:1px solid #ddd;'>", unsafe_allow_html=True)
         t6_mapping_file = st.file_uploader("📥 Upload Client Mapping Directory (CSV/Excel)", type=["csv", "xlsx", "xls"], key="t6_mapping_uploader")
         
         if t6_mapping_file:
-            file_id_key = f"processed_{t6_mapping_file.name}_{t6_mapping_file.size}_{selected_client_policy}"
-            if not st.session_state.get(file_id_key, False):
-                with st.spinner("Processing mapping directory sheet..."):
-                    try:
-                        if t6_mapping_file.name.endswith('.csv'): df_map = pd.read_csv(t6_mapping_file)
-                        else: df_map = pd.read_excel(t6_mapping_file)
-                        df_map = clean_and_align_dataframe(df_map)
-                        df_map_cols = list(df_map.columns)
+            try:
+                if t6_mapping_file.name.endswith('.csv'): raw_df_map = pd.read_csv(t6_mapping_file)
+                else: raw_df_map = pd.read_excel(t6_mapping_file)
+                
+                with st.expander("🛠️ Advanced Sheet Options (If headers are on a specific row)", expanded=False):
+                    header_row_choice = st.number_input("Header Row Index:", min_value=0, max_value=min(15, len(raw_df_map)-1), value=0, step=1, key="t6_custom_header_idx")
+                    use_manual_header = st.checkbox("Apply custom header row", value=False, key="t6_apply_custom_hdr")
+                
+                if use_manual_header: df_map = clean_and_align_dataframe(raw_df_map.copy(), forced_header_row=header_row_choice)
+                else: df_map = clean_and_align_dataframe(raw_df_map.copy())
+                    
+                df_map_cols = list(df_map.columns)
+                
+                st.markdown("##### ⚙️ Map Directory Columns")
+                g_emp = robust_guess_column(df_map_cols, ["EMP ID", "EMPLOYEE ID", "EMP", "ID", "HAT", "CO", "CODE"]) or df_map_cols[0]
+                g_name = robust_guess_column(df_map_cols, ["MEMBER NAME", "NAME", "EMPLOYEE NAME", "INSURED"]) or (df_map_cols[1] if len(df_map_cols) > 1 else df_map_cols[0])
+                g_email = robust_guess_column(df_map_cols, ["EMAIL", "EMAIL ADDRESS", "E CARDS ACCESS CODE", "ACCESS", "MAIL"]) or (df_map_cols[2] if len(df_map_cols) > 2 else df_map_cols[0])
+                g_rel = robust_guess_column(df_map_cols, ["RELATION", "RELATIONSHIP", "RELATI", "REL"])
+                
+                idx_emp = df_map_cols.index(g_emp) if g_emp in df_map_cols else 0
+                idx_name = df_map_cols.index(g_name) if g_name in df_map_cols else min(1, len(df_map_cols)-1)
+                idx_email = df_map_cols.index(g_email) if g_email in df_map_cols else min(2, len(df_map_cols)-1)
+                
+                c_m1, c_m2 = st.columns(2)
+                with c_m1:
+                    emp_col_map = st.selectbox("Employee ID Column*", df_map_cols, index=idx_emp, key="t6_sel_emp")
+                    email_col_map = st.selectbox("Email Address Column*", df_map_cols, index=idx_email, key="t6_sel_email")
+                with c_m2:
+                    name_col_map = st.selectbox("Full Name Column*", df_map_cols, index=idx_name, key="t6_sel_name")
+                    rel_options = ["None (All Rows are Primary Employees)"] + df_map_cols
+                    idx_rel = rel_options.index(g_rel) if (g_rel and g_rel in rel_options) else 0
+                    rel_col_map = st.selectbox("Relationship Column (Optional)", rel_options, index=idx_rel, key="t6_sel_rel")
+                
+                if st.button("🚀 Sync Directory to Campaign", type="primary", use_container_width=True, key="btn_sync_t6"):
+                    with st.spinner("Syncing employee directory..."):
+                        added_records = 0
+                        parsed_employees = {}
+                        has_rel = rel_col_map != "None (All Rows are Primary Employees)"
                         
-                        emp_col_map = robust_guess_column(df_map_cols, ["EMP ID", "EMPLOYEE ID", "ID", "HAT", "CO"])
-                        name_col_map = robust_guess_column(df_map_cols, ["MEMBER NAME", "NAME", "EMPLOYEE NAME", "INSURED"])
-                        email_col_map = robust_guess_column(df_map_cols, ["EMAIL", "EMAIL ADDRESS", "E CARDS ACCESS CODE", "ACCESS", "MAIL"])
-                        rel_col_map = robust_guess_column(df_map_cols, ["RELATION", "RELATIONSHIP", "RELATI", "REL"])
+                        for _, row in df_map.iterrows():
+                            raw_emp_id = str(row[emp_col_map]).strip().upper()
+                            if raw_emp_id.endswith('.0'): raw_emp_id = raw_emp_id[:-2]
+                            raw_name = str(row[name_col_map]).strip()
+                            
+                            # SANITIZE 'nan' TO CLEAN EMPTY STRING
+                            raw_email = str(row[email_col_map]).strip().lower()
+                            if raw_email in ["nan", "none", "null", "undefined", ""]: raw_email = ""
+                            
+                            raw_rel = str(row[rel_col_map]).strip().upper() if has_rel else "SELF"
+                            
+                            if not raw_emp_id or raw_emp_id in ["NAN", "NONE", ""]: continue
+                            
+                            if raw_emp_id not in parsed_employees or raw_rel in ["SELF", "PRIMARY", "EMPLOYEE", "PROPOSER"]:
+                                parsed_employees[raw_emp_id] = {"name": raw_name, "email": raw_email}
                         
-                        if not emp_col_map or not name_col_map or not email_col_map:
-                            st.error("🚨 Column mapping failed. Please check your spreadsheet headers.")
-                        else:
-                            added_records = 0
-                            parsed_employees = {}
-                            for _, row in df_map.iterrows():
-                                raw_emp_id = str(row[emp_col_map]).strip().upper()
-                                raw_name = str(row[name_col_map]).strip()
-                                raw_email = str(row[email_col_map]).strip().lower()
-                                raw_rel = str(row[rel_col_map]).strip().upper() if (rel_col_map and rel_col_map in row) else "SELF"
-                                
-                                if not raw_emp_id or raw_emp_id in ["NAN", ""]: continue
-                                if raw_emp_id not in parsed_employees or raw_rel in ["SELF", "PRIMARY", "EMPLOYEE", "PROPOSER"]:
-                                    parsed_employees[raw_emp_id] = {"name": raw_name, "email": raw_email}
-                            
-                            for emp_id_key, detail in parsed_employees.items():
-                                save_employee_to_directory(emp_id_key, detail["name"], detail["email"], selected_client_policy)
-                                added_records += 1
-                            
-                            st.session_state[file_id_key] = True
-                            st.success(f"✅ Synced **{added_records}** primary employees to DB.")
-                            time.sleep(1)
-                            st.rerun()
-                    except Exception as e: st.error(f"Error parsing mapping sheet: {e}")
+                        for emp_id_key, detail in parsed_employees.items():
+                            save_employee_to_directory(emp_id_key, detail["name"], detail["email"], selected_client_policy)
+                            added_records += 1
+                        
+                        st.success(f"✅ Successfully synced **{added_records}** employees to campaign **{selected_client_policy}**!")
+                        time.sleep(1.5)
+                        st.rerun()
+                        
+            except Exception as e:
+                st.error(f"Error parsing mapping sheet: {e}")
+                
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.divider()
+        
+        # --- QUERY PENDING CARDS & CATEGORIZE QUEUE ---
         pending_ecards = list(db.ecards.find({"policy_no": selected_client_policy, "email_sent": {"$ne": True}}))
         
-        pending_display_list = []
+        ready_to_send_jobs = []
+        missing_email_jobs = []
+        all_display_list = []
+        
         for ecard in pending_ecards:
             directory_record = db.directory.find_one({"emp_id": ecard["emp_id"], "policy_no": selected_client_policy})
-            if directory_record:
-                pending_display_list.append({"EMP ID": ecard["emp_id"], "Name": directory_record.get("name", "UNKNOWN"), "Email": directory_record.get("email", ""), "Card Type": ecard["card_type"]})
+            emp_name = directory_record.get("name", "UNKNOWN (Missing Directory Metadata)") if directory_record else "UNKNOWN (Missing Directory Metadata)"
+            emp_email = directory_record.get("email", "") if directory_record else ""
+            if emp_email in ["nan", "none", "null", "undefined"]: emp_email = ""
+            
+            job_item = {
+                "EMP ID": ecard["emp_id"],
+                "Name": emp_name,
+                "Email": emp_email if emp_email else "⚠️ Missing Email (nan)",
+                "Card Type": ecard["card_type"],
+                "_clean_email": emp_email
+            }
+            all_display_list.append(job_item)
+            
+            if emp_email and "@" in emp_email:
+                ready_to_send_jobs.append(job_item)
             else:
-                pending_display_list.append({"EMP ID": ecard["emp_id"], "Name": "UNKNOWN", "Email": "", "Card Type": ecard["card_type"]})
+                missing_email_jobs.append(job_item)
 
-        if pending_display_list:
-            df_pending = pd.DataFrame(pending_display_list)
-            st.dataframe(df_pending[["EMP ID", "Name", "Email", "Card Type"]], hide_index=True, use_container_width=True)
+        # RENDER METRICS SUMMARY
+        m_q1, m_q2 = st.columns(2)
+        m_q1.metric("🟢 Ready to Dispatch", len(ready_to_send_jobs))
+        m_q2.metric("⚠️ Missing Email / Incomplete", len(missing_email_jobs))
+
+        if all_display_list:
+            df_display = pd.DataFrame(all_display_list).drop(columns=["_clean_email"])
+            st.dataframe(df_display, hide_index=True, use_container_width=True)
         else:
-            st.info("No pending enrollments.")
+            st.info("🎉 All emails for this campaign have been successfully delivered!")
 
         st.divider()
         st.subheader("✉️ Process Mail Queue")
         
-        batch_limit = st.number_input("Batch Run Limit", min_value=1, max_value=500, value=20, step=1)
-        jobs_to_process = min(len(pending_display_list), batch_limit)
+        # BATCH SIZE SELECTOR (BASED ON READY-TO-SEND LIST)
+        batch_limit = st.number_input("Batch Run Limit", min_value=1, max_value=500, value=min(20, max(1, len(ready_to_send_jobs))), step=1)
+        jobs_to_process = min(len(ready_to_send_jobs), batch_limit)
         
-        if st.button(f"▶️ Process {jobs_to_process} Jobs", type="primary", use_container_width=True, disabled=(jobs_to_process == 0)):
+        # BUTTON PROCESSES ONLY VALID EMAILS!
+        if st.button(f"▶️ Process {jobs_to_process} Ready Jobs", type="primary", use_container_width=True, disabled=(jobs_to_process == 0)):
             sent_success_count = 0
+            smtp_errors = []
+            skipped_no_card = []
+            
             progress_bar = st.progress(0)
             status_update = st.empty()
             
-            for idx, job in enumerate(pending_display_list[:jobs_to_process]):
+            # LOOP OVER ONLY VALID READY JOBS!
+            for idx, job in enumerate(ready_to_send_jobs[:jobs_to_process]):
                 emp_id = job["EMP ID"]
-                recipient_email = job["Email"]
+                recipient_email = job["_clean_email"]
                 emp_name = job["Name"]
                 
-                if not recipient_email or "@" not in recipient_email: continue
-                
-                status_update.text(f"Sending email to {emp_name} ({emp_id})...")
+                status_update.text(f"Sending email to {emp_name} ({emp_id}) ➡️ {recipient_email}...")
                 cards = get_cards_from_db(emp_id, policy_no=selected_client_policy)
                 
-                if cards:
-                    customized_html = html_body_input.replace("{{name}}", emp_name).replace("{{emp_id}}", emp_id).replace("{{policy_no}}", selected_client_policy).replace("{{deadline}}", active_deadline_text)
-                    mail_sent = send_multi_ecard_email(recipient_email, subject_line_input, customized_html, cards)
+                if not cards:
+                    skipped_no_card.append(f"Emp ID {emp_id} ({emp_name})")
+                    progress_bar.progress((idx + 1) / jobs_to_process)
+                    continue
+                
+                customized_html = html_body_input.replace("{{name}}", emp_name).replace("{{emp_id}}", emp_id).replace("{{policy_no}}", selected_client_policy).replace("{{deadline}}", active_deadline_text)
+                mail_sent, error_reason = send_multi_ecard_email(recipient_email, subject_line_input, customized_html, cards)
+                
+                if mail_sent:
+                    db.ecards.update_many({"emp_id": emp_id, "policy_no": selected_client_policy}, {"$set": {"email_sent": True}})
+                    sent_success_count += 1
+                else:
+                    smtp_errors.append(f"Emp ID {emp_id} ({recipient_email}) ➡️ {error_reason}")
                     
-                    if mail_sent:
-                        db.ecards.update_many({"emp_id": emp_id, "policy_no": selected_client_policy}, {"$set": {"email_sent": True}})
-                        sent_success_count += 1
-                        
                 progress_bar.progress((idx + 1) / jobs_to_process)
                 
             status_update.empty()
             progress_bar.empty()
-            st.success(f"Successfully processed queue! Sent **{sent_success_count}** welcome emails.")
-            time.sleep(1)
+            
+            if sent_success_count > 0:
+                st.success(f"🎉 Successfully dispatched **{sent_success_count}** welcome emails!")
+            else:
+                st.warning(f"⚠️ Attempted batch, but **0** emails were delivered.")
+                
+            if skipped_no_card:
+                with st.expander(f"🚨 Skipped {len(skipped_no_card)} records (E-Card PDF not found in Database)"):
+                    for item in skipped_no_card: st.write(f"• {item}")
+                    
+            if smtp_errors:
+                with st.expander(f"❌ Failed to Deliver {len(smtp_errors)} Emails (SMTP Errors)"):
+                    for err in smtp_errors: st.error(err)
+                    
+            time.sleep(1.5)
             st.rerun()
 
         st.divider()
@@ -1235,11 +1368,10 @@ with tab_email:
                 db.ecards.update_many({"emp_id": reset_target_id.strip().upper(), "policy_no": selected_client_policy}, {"$set": {"email_sent": False}})
                 st.success(f"Employee {reset_target_id} re-queued!"); time.sleep(1); st.rerun()
                 
-            if st.button("🚨 Re-queue All Users", type="secondary", use_container_width=True):
+            if st.button("🚨 Re-queue All Users in Selected Campaign", type="secondary", use_container_width=True):
                 db.ecards.update_many({"policy_no": selected_client_policy}, {"$set": {"email_sent": False}})
                 st.success("All users re-queued!"); time.sleep(1); st.rerun()
-
-# ==============================================================================
+                
 # --- TAB 7: LIGHTNING-FAST FILENAME-BASED FAMILYFICATION ---
 # ==============================================================================
 with tab_family:
