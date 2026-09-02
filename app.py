@@ -17,7 +17,7 @@ import ssl
 import certifi
 import requests  
 import re  
-import secrets  # For cryptographically secure OTP generation
+import secrets  # Cryptographically secure OTP generation
 from werkzeug.security import generate_password_hash, check_password_hash
 from paddleocr import PaddleOCR
 import boto3
@@ -65,20 +65,78 @@ def parse_int_safe(val):
     try: return int(val_str)
     except ValueError: return None
 
-def clean_and_align_dataframe(df):
-    if df.empty: return df
-    first_col_name = str(df.columns[0]).upper()
-    if "TOTAL RECORD" in first_col_name or "RECORD COUNT" in first_col_name:
-        header_row_idx = None
-        for idx in range(min(5, len(df))):
-            row_vals = [str(x).strip().upper() for x in df.iloc[idx].values]
-            if any("POLICY" in val for val in row_vals):
-                header_row_idx = idx
-                break
-        if header_row_idx is not None:
-            df.columns = [str(x).strip() for x in df.iloc[header_row_idx].values]
-            df = df.iloc[header_row_idx + 1:].reset_index(drop=True)
+def clean_and_align_dataframe(df, forced_header_row=None):
+    """
+    Intelligently scans the top 15 rows of any corporate spreadsheet to find where
+    the real column headers (Emp ID, Name, Email, etc.) are located, stripping away
+    title banners, metadata rows, and empty cells.
+    """
+    if df.empty:
+        return df
+        
+    KEYWORD_BANK = [
+        "EMP", "EMPLOYEE", "ID", "MEMBER", "NAME", "INSURED", "EMAIL", "MAIL", 
+        "RELATION", "RELATIONSHIP", "POLICY", "CARD", "DOB", "AGE", "GENDER", 
+        "GHI", "SUM", "DOJ", "CO", "HAT", "ADDRESS", "UHID", "CODE", "STATUS", "CORP"
+    ]
+    
+    # 1. If user explicitly picked a header row from the UI
+    if forced_header_row is not None and 0 <= forced_header_row < len(df):
+        raw_headers = df.iloc[forced_header_row].values
+        clean_headers = []
+        seen = {}
+        for i, h in enumerate(raw_headers):
+            h_clean = str(h).strip() if pd.notna(h) and str(h).strip() not in ["", "nan", "None"] else f"Column_{i+1}"
+            if h_clean in seen:
+                seen[h_clean] += 1
+                h_clean = f"{h_clean}_{seen[h_clean]}"
+            else:
+                seen[h_clean] = 0
+            clean_headers.append(h_clean)
+        df.columns = clean_headers
+        df = df.iloc[forced_header_row + 1:].reset_index(drop=True)
+        return df.dropna(how="all").reset_index(drop=True)
+
+    # 2. Automated Smart Scanner
+    cols_str = [str(c).strip().upper() for c in df.columns]
+    unnamed_count = sum(1 for c in cols_str if "UNNAMED" in c or c in ["", "NAN", "NONE"])
+    
+    needs_header_search = (unnamed_count / len(cols_str)) > 0.3 or any(kw in cols_str[0] for kw in ["TOTAL RECORD", "RECORD COUNT", "REPORT", "CLIENT", "LIST"])
+    
+    best_header_idx = None
+    max_score = 0
+    
+    scan_limit = min(15, len(df))
+    for r_idx in range(scan_limit):
+        row_vals = [str(x).strip().upper() for x in df.iloc[r_idx].values if pd.notna(x)]
+        score = 0
+        for val in row_vals:
+            for kw in KEYWORD_BANK:
+                if kw in val:
+                    score += 1
+                    break
+        if score > max_score and score >= 2:
+            max_score = score
+            best_header_idx = r_idx
+            
+    if best_header_idx is not None and (needs_header_search or max_score >= 3):
+        raw_headers = df.iloc[best_header_idx].values
+        clean_headers = []
+        seen = {}
+        for i, h in enumerate(raw_headers):
+            h_clean = str(h).strip() if pd.notna(h) and str(h).strip() not in ["", "nan", "None"] else f"Column_{i+1}"
+            if h_clean in seen:
+                seen[h_clean] += 1
+                h_clean = f"{h_clean}_{seen[h_clean]}"
+            else:
+                seen[h_clean] = 0
+            clean_headers.append(h_clean)
+            
+        df.columns = clean_headers
+        df = df.iloc[best_header_idx + 1:].reset_index(drop=True)
+        
     df.columns = [str(c).strip() for c in df.columns]
+    df = df.dropna(how="all").reset_index(drop=True)
     return df
 
 def robust_guess_column(columns, primary_keywords, fallback_keywords=None):
@@ -148,6 +206,9 @@ def init_db():
     db.card_members.create_index("emp_id")
     db.directory.create_index([("emp_id", pymongo.ASCENDING), ("policy_no", pymongo.ASCENDING)], unique=True)
     db.assets.create_index("name", unique=True)
+    # 7-Day Rolling History TTL Index (Auto-deletes records after 7 days = 604,800 seconds)
+    db.email_logs.create_index("timestamp", expireAfterSeconds=604800)
+    db.email_logs.create_index([("policy_no", pymongo.ASCENDING), ("status", pymongo.ASCENDING)])
 
 def authenticate_user(username_or_email, password):
     db = get_db()
@@ -292,7 +353,23 @@ def save_asset(asset_name, binary_data):
 def delete_asset(asset_name):
     get_db().assets.delete_one({"name": asset_name})
 
-# --- SMTP EMAIL DISPATCH ENGINE ---
+# --- DISPATCH AUDIT LOGGER (7-DAY TTL) ---
+def log_email_dispatch(emp_id, name, recipient_email, policy_no, status, error_reason=None):
+    try:
+        db = get_db()
+        db.email_logs.insert_one({
+            "emp_id": str(emp_id).strip().upper(),
+            "name": str(name).strip(),
+            "recipient_email": str(recipient_email).strip().lower(),
+            "policy_no": str(policy_no).strip().upper(),
+            "status": status,  # "DELIVERED" or "FAILED"
+            "error_reason": str(error_reason) if error_reason else None,
+            "dispatched_by": st.session_state.get("username", "SYSTEM"),
+            "timestamp": datetime.utcnow()
+        })
+    except Exception as e:
+        logging.error(f"Failed to log email dispatch: {e}")
+
 # --- SMTP EMAIL DISPATCH ENGINE (WITH EXPLICIT ERROR REPORTING) ---
 def send_multi_ecard_email(recipient_email, subject, body_html, cards_list):
     try:
@@ -350,6 +427,7 @@ def send_multi_ecard_email(recipient_email, subject, body_html, cards_list):
         return True, None
     except Exception as e:
         return False, str(e)
+
 # --- EXTRACTION BOUNDARY LOGIC ---
 def detect_card_boundaries(page):
     try:
@@ -485,7 +563,6 @@ if not st.session_state.logged_in:
                         
         # --- TAB 2: OTP-VERIFIED REGISTRATION ---
         with tab_register:
-            # STEP 1: Enter Credentials & Request OTP
             if st.session_state.reg_step == 1:
                 st.subheader("Step 1: Account Details")
                 with st.form("reg_step1_form"):
@@ -512,7 +589,6 @@ if not st.session_state.logged_in:
                         elif db_conn.users.find_one({"$or": [{"username": clean_user}, {"email": clean_email}]}):
                             st.error("⚠️ An account with this username or email address already exists.")
                         else:
-                            # Generate cryptographically secure 6-digit OTP
                             generated_otp = str(secrets.randbelow(900000) + 100000)
                             
                             with st.spinner("Dispatching verification OTP to your inbox..."):
@@ -531,7 +607,6 @@ if not st.session_state.logged_in:
                                 else:
                                     st.error("❌ Failed to send verification email. Please check your SMTP configuration in secrets.")
 
-            # STEP 2: Verify OTP & Complete Registration
             elif st.session_state.reg_step == 2:
                 payload = st.session_state.reg_payload
                 st.subheader("Step 2: Enter Verification Code")
@@ -740,12 +815,11 @@ with tab_universal:
                         card_type = "BASE"
                         if any(kw in group["raw_text_concat"].lower() for kw in ["topup", "top up", "top-up", "super top"]): card_type = "TOPUP"
                         
-                        # Apply Priority 1 (Manual/Selector) > Priority 2 (Detected)
                         p_no = target_policy_override.strip().upper() if target_policy_override else (group["metadata"][0].policy_no or "UNKNOWN_POLICY")
                         comp_name = target_company.strip().upper() if target_company else (getattr(group["metadata"][0], 'company_name', None) or "GENERAL_CORP")
                         
                         save_card_to_db(eid, merged_bytes, st.session_state.username, group["metadata"], p_no, card_type, comp_name)
-                        save_name = f"{eid}_ECard.pdf" if opt_rename else f"Processed_Family_{eid}.pdf"
+                        save_name = f"{eid}_ECard.pdf" if opt_rename else f"{eid}_Ecard.pdf"
                         zip_file.writestr(save_name, merged_bytes)
                         processed_count += 1
                         
@@ -766,7 +840,7 @@ with tab_universal:
                         
                         if opt_rename:
                             safe_name = re.sub(r'[^A-Za-z0-9]', '', str(card["metadata"].name)) if card["metadata"].name else str(idx_card)
-                            save_name = f"{eid}_{safe_name}_ECard.pdf"
+                            save_name = f"{eid}_ECard.pdf"
                         else:
                             save_name = card["original_name"]
                             
@@ -783,7 +857,7 @@ with tab_universal:
                     for err in mismatches: st.text(err)
 
     if st.session_state.get('zip_data'):
-        st.download_button("📥 Download Final PDF Output (.zip)", data=st.session_state.zip_data, file_name="Processed_ECards_Archive.zip", mime="application/zip", type="primary", use_container_width=True)
+        st.download_button(f"📥 Download Final PDF Output ({clean_comp_preview}.zip)", data=st.session_state.zip_data, file_name=f"{clean_comp_preview}_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
 
 # ==============================================================================
 # --- TAB 2: MODULAR INGESTION SYSTEM ---
@@ -987,14 +1061,12 @@ with tab_search:
                 preview_doc.close()
         else: st.error("No E-Card found.")
 
-
-
 # ==============================================================================
-# --- TAB 6: EMAIL DISTRIBUTION AGENT (WITH PROMINENT FORM CONTROLLER) ---
+# --- TAB 6: EMAIL DISTRIBUTION AGENT (WITH LOGS & 1-CLICK RETRY) ---
 # ==============================================================================
 with tab_email:
     st.markdown("### ✉️ Email Dispatch Center")
-    st.markdown("Configure corporate assets, manage correction form response windows, and dispatch welcome emails.")
+    st.markdown("Configure corporate assets, manage correction form response windows, dispatch welcome emails, and audit delivery history.")
     
     policies_registered = db.ecards.distinct("policy_no")
     if not policies_registered: policies_registered = ["No Clients Ingested"]
@@ -1069,25 +1141,19 @@ with tab_email:
                 time.sleep(0.5)
                 st.rerun()
 
-        # Check Live Form Status
         current_form_status = get_form_status(stored_gas_url) if stored_gas_url else "DISCONNECTED"
         active_deadline_text = get_deadline_from_db(selected_client_policy)
         
-        # Auto-update status if expired
         if current_form_status == "CLOSED" and active_deadline_text not in ["Form Closed", "Expired / Closed", "Not Set"]:
             save_deadline_to_db(selected_client_policy, "Expired / Closed")
             active_deadline_text = "Expired / Closed"
 
-        # RENDER STATUS CARD
         st.markdown("<div style='background-color: #f8f9fa; border: 1px solid #ced4da; padding: 15px; border-radius: 8px; margin-bottom: 15px;'>", unsafe_allow_html=True)
         col_stat1, col_stat2 = st.columns(2)
         with col_stat1:
-            if current_form_status == "OPEN":
-                st.markdown("Live Form Status: **🟢 OPEN (Accepting Responses)**")
-            elif current_form_status == "CLOSED":
-                st.markdown("Live Form Status: **🔴 CLOSED (Submissions Shut)**")
-            else:
-                st.markdown(f"Live Form Status: **⚠️ {current_form_status}**")
+            if current_form_status == "OPEN": st.markdown("Live Form Status: **🟢 OPEN (Accepting Responses)**")
+            elif current_form_status == "CLOSED": st.markdown("Live Form Status: **🔴 CLOSED (Submissions Shut)**")
+            else: st.markdown(f"Live Form Status: **⚠️ {current_form_status}**")
         with col_stat2:
             st.markdown(f"⏱️ Active Window Closes: **{active_deadline_text}**")
             
@@ -1101,7 +1167,7 @@ with tab_email:
                 key="t6_deadline_select"
             )
         with col_btns:
-            st.text("") # vertical align spacer
+            st.text("") 
             c_btn_open, c_btn_close = st.columns(2)
             
             with c_btn_open:
@@ -1113,45 +1179,32 @@ with tab_email:
                         if res:
                             save_deadline_to_db(selected_client_policy, "Manual Close Required")
                             st.success("Google Form is now OPEN (Manual close required).")
-                            time.sleep(1)
-                            st.rerun()
+                            time.sleep(1); st.rerun()
                     else:
-                        duration_mapping = {
-                            "1 Day (24 hrs)": 24.0,
-                            "3 Days (72 hrs)": 72.0,
-                            "1 Week (7 Days)": 168.0,
-                            "10 Days": 240.0,
-                            "2 Weeks (14 Days)": 336.0
-                        }
+                        duration_mapping = {"1 Day (24 hrs)": 24.0, "3 Days (72 hrs)": 72.0, "1 Week (7 Days)": 168.0, "10 Days": 240.0, "2 Weeks (14 Days)": 336.0}
                         target_hours = duration_mapping[deadline_option]
                         with st.spinner("Communicating with Google Apps Script..."):
                             response_text = schedule_form_close(stored_gas_url, target_hours)
-                            
                             if response_text and "SCHEDULED_FOR_" in response_text:
                                 iso_str = response_text.replace("SCHEDULED_FOR_", "")
                                 utc_datetime = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
                                 local_datetime = utc_datetime + timedelta(hours=5, minutes=30)
                                 formatted_deadline_str = local_datetime.strftime("%B %d, %Y at %I:%M %p (IST)")
-                                
                                 save_deadline_to_db(selected_client_policy, formatted_deadline_str)
                                 st.success(f"Form OPENED and scheduled to close on: {formatted_deadline_str}")
-                                time.sleep(1.5)
-                                st.rerun()
-                            else:
-                                st.error(f"Failed to communicate with Google Form API: {response_text}")
+                                time.sleep(1.5); st.rerun()
+                            else: st.error(f"Failed to communicate with Google Form API: {response_text}")
                                 
             with c_btn_close:
                 if st.button("🔴 Close Form", use_container_width=True, key="btn_close_gform"):
-                    if not stored_gas_url:
-                        st.error("Please configure the Google Apps Script Web App URL above.")
+                    if not stored_gas_url: st.error("Please configure the Google Apps Script Web App URL above.")
                     else:
                         with st.spinner("Closing Google Form..."):
                             res = set_form_status(stored_gas_url, "close")
                             if res:
                                 save_deadline_to_db(selected_client_policy, "Form Closed")
                                 st.warning("Google Form is now CLOSED to responses!")
-                                time.sleep(1.5)
-                                st.rerun()
+                                time.sleep(1.5); st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.divider()
@@ -1247,11 +1300,7 @@ with tab_email:
       <p style="color: #C29B38; font-size: 11px; font-weight: bold; margin-top: 6px;">⏱️ Correction Form Window Closes On: {{{{deadline}}}}</p>
     </div>
   </div>
-
-  <!-- Dynamic Poster Attachment Hook -->
   <!-- FOOTER -->
-
-  <!-- CapitUp India Corporate Footer with Logo Signature Mark -->
   <div style="background-color: #F4F6F8; padding: 24px; text-align: center; border-top: 1px solid #e5e7eb;">
     <p style="margin: 0; font-size: 12px; color: #0B1E30; font-weight: bold;">Thank you for being part of the CapitUp Family</p>
     <p style="margin: 4px 0 0 0; font-size: 10px; color: #888;">CapitUp India Pvt. Ltd. | 4th Floor, HUDA Techno Enclave, HITEC City, Hyderabad-500081</p>
@@ -1323,6 +1372,7 @@ with tab_email:
                             if raw_emp_id.endswith('.0'): raw_emp_id = raw_emp_id[:-2]
                             raw_name = str(row[name_col_map]).strip()
                             
+                            # Clean string conversion to avoid 'nan'
                             raw_email = str(row[email_col_map]).strip().lower()
                             if raw_email in ["nan", "none", "null", "undefined", ""]: raw_email = ""
                             
@@ -1409,6 +1459,7 @@ with tab_email:
                 
                 if not cards:
                     skipped_no_card.append(f"Emp ID {emp_id} ({emp_name})")
+                    log_email_dispatch(emp_id, emp_name, recipient_email, selected_client_policy, "FAILED", "E-Card PDF not found in DB")
                     progress_bar.progress((idx + 1) / jobs_to_process)
                     continue
                 
@@ -1417,9 +1468,11 @@ with tab_email:
                 
                 if mail_sent:
                     db.ecards.update_many({"emp_id": emp_id, "policy_no": selected_client_policy}, {"$set": {"email_sent": True}})
+                    log_email_dispatch(emp_id, emp_name, recipient_email, selected_client_policy, "DELIVERED")
                     sent_success_count += 1
                 else:
                     smtp_errors.append(f"Emp ID {emp_id} ({recipient_email}) ➡️ {error_reason}")
+                    log_email_dispatch(emp_id, emp_name, recipient_email, selected_client_policy, "FAILED", error_reason)
                     
                 progress_bar.progress((idx + 1) / jobs_to_process)
                 
@@ -1443,20 +1496,76 @@ with tab_email:
             st.rerun()
 
         st.divider()
-        # --- SECTION 6: ADMIN RE-QUEUE TESTING CONTROLS ---
-        with st.expander("🛠️ Admin Testing & Queue Controls", expanded=False):
+
+        # --- SECTION 6: DISPATCH AUDIT LOGS & 1-CLICK RETRY CENTER ---
+        st.subheader("📊 Dispatch History & Smart Retry Center")
+        st.caption("Rolling 7-day delivery audit log. Filter by failure and re-queue in 1 click.")
+        
+        recent_logs = list(db.email_logs.find({"policy_no": selected_client_policy}).sort("timestamp", -1).limit(100))
+        
+        delivered_logs = [l for l in recent_logs if l["status"] == "DELIVERED"]
+        failed_logs = [l for l in recent_logs if l["status"] == "FAILED"]
+        
+        col_log_m1, col_log_m2, col_log_m3 = st.columns(3)
+        col_log_m1.metric("Recent Deliveries", len(delivered_logs))
+        col_log_m2.metric("Recent Failures", len(failed_logs))
+        col_log_m3.metric("Delivery Rate", f"{(len(delivered_logs) / len(recent_logs) * 100):.1f}%" if recent_logs else "N/A")
+        
+        # --- 1-CLICK FAILED EMAIL RETRY BUTTON ---
+        if failed_logs:
+            if st.button(f"🔄 Re-queue All {len(failed_logs)} Failed Emails (1-Click)", type="primary", use_container_width=True, key="btn_requeue_failed_only"):
+                failed_ids = list(set([doc["emp_id"] for doc in failed_logs]))
+                db.ecards.update_many(
+                    {"emp_id": {"$in": failed_ids}, "policy_no": selected_client_policy},
+                    {"$set": {"email_sent": False}}
+                )
+                db.email_logs.delete_many({"policy_no": selected_client_policy, "status": "FAILED"})
+                st.success(f"✅ Successfully re-queued {len(failed_ids)} failed employees for resending!")
+                time.sleep(1.5)
+                st.rerun()
+
+        if recent_logs:
+            log_display_data = []
+            for l in recent_logs:
+                log_display_data.append({
+                    "Time (IST)": (l["timestamp"] + timedelta(hours=5, minutes=30)).strftime("%d-%b %I:%M %p"),
+                    "Emp ID": l["emp_id"],
+                    "Name": l["name"],
+                    "Email": l["recipient_email"],
+                    "Status": "✅ DELIVERED" if l["status"] == "DELIVERED" else "❌ FAILED",
+                    "Error / Notes": l.get("error_reason") or "Delivered successfully"
+                })
+            df_logs = pd.DataFrame(log_display_data)
+            
+            log_filter = st.radio("Filter Log History:", ["All Recent Dispatches", "❌ Failed Only", "✅ Delivered Only"], horizontal=True, key="t6_log_filter")
+            if log_filter == "❌ Failed Only":
+                df_logs = df_logs[df_logs["Status"] == "❌ FAILED"]
+            elif log_filter == "✅ Delivered Only":
+                df_logs = df_logs[df_logs["Status"] == "✅ DELIVERED"]
+                
+            st.dataframe(df_logs, hide_index=True, use_container_width=True)
+            
+            if st.button("🗑️ Clear Audit History for Campaign", key="btn_clear_logs"):
+                db.email_logs.delete_many({"policy_no": selected_client_policy})
+                st.success("Audit history cleared!")
+                time.sleep(1)
+                st.rerun()
+        else:
+            st.info("No dispatch history recorded for this campaign yet.")
+
+        st.divider()
+
+        # --- SECTION 7: ADMIN MANUAL RE-QUEUE CONTROLS ---
+        with st.expander("🛠️ Admin Manual Testing Controls", expanded=False):
             col_admin_input, col_admin_btn = st.columns([2, 1])
             reset_target_id = col_admin_input.text_input("Target Employee ID to Re-queue:")
-            if col_admin_btn.button("🔄 Re-queue", use_container_width=True) and reset_target_id:
+            if col_admin_btn.button("🔄 Re-queue ID", use_container_width=True) and reset_target_id:
                 db.ecards.update_many({"emp_id": reset_target_id.strip().upper(), "policy_no": selected_client_policy}, {"$set": {"email_sent": False}})
                 st.success(f"Employee {reset_target_id} re-queued!"); time.sleep(1); st.rerun()
                 
-            if st.button("🚨 Re-queue All Users in Selected Campaign", type="secondary", use_container_width=True):
+            if st.button("🚨 Re-queue Entire Campaign (Reset All)", type="secondary", use_container_width=True):
                 db.ecards.update_many({"policy_no": selected_client_policy}, {"$set": {"email_sent": False}})
-                st.success("All users re-queued!"); time.sleep(1); st.rerun()
-
-
-
+                st.success("All users in campaign re-queued!"); time.sleep(1); st.rerun()
 
 # ==============================================================================
 # --- TAB 7: LIGHTNING-FAST FILENAME-BASED FAMILYFICATION ---
@@ -1601,8 +1710,8 @@ with tab_gap:
                         st.divider()
                         m1, m2, m3 = st.columns(3)
                         m1.metric("Total Members in Tracker", len(df_gap))
-                        m1.metric("Matched E-Cards Found", len(df_matched))
-                        m1.metric("Missing E-Cards (Gaps)", len(df_missing))
+                        m2.metric("Matched E-Cards Found", len(df_matched))
+                        m3.metric("Missing E-Cards (Gaps)", len(df_missing))
 
                         if not df_missing.empty:
                             st.warning(f"Identified {len(df_missing)} active member(s) lacking corresponding matches in the ZIP file archive.")
