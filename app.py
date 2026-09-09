@@ -18,7 +18,7 @@ import certifi
 import requests  
 import re  
 import secrets  
-import urllib.parse  # For URL-encoding Google Form parameters safely
+import urllib.parse  
 from werkzeug.security import generate_password_hash, check_password_hash
 from paddleocr import PaddleOCR
 import boto3
@@ -157,7 +157,7 @@ if "r2" in st.secrets:
     )
     R2_ENABLED = True
 
-@st.cache_resource(show_spinner="Loading AI Vision Engine... (First load takes a few seconds)")
+@st.cache_resource(show_spinner=False)
 def load_ocr_engine():
     logging.getLogger('ppocr').setLevel(logging.ERROR)
     return PaddleOCR(use_textline_orientation=True, lang='en')
@@ -169,20 +169,20 @@ def get_mongo_client():
 def get_db():
     return get_mongo_client()[MONGO_DBNAME]
 
-# --- GOOGLE FORM CONTROLLER UTILITIES (DECLARED GLOBALLY) ---
+# --- GOOGLE FORM UTILITIES ---
 def get_form_status(api_url):
     if not api_url or not str(api_url).startswith("http"): return "DISCONNECTED"
-    try: return requests.get(api_url + "?action=status", timeout=10).text.strip().upper()
+    try: return requests.get(api_url + "?action=status", timeout=4).text.strip().upper()
     except Exception: return "DISCONNECTED"
 
 def set_form_status(api_url, action):
     if not api_url or not str(api_url).startswith("http"): return None
-    try: return requests.get(api_url + f"?action={action}", timeout=10).text.strip().upper()
+    try: return requests.get(api_url + f"?action={action}", timeout=5).text.strip().upper()
     except Exception: return None
 
 def schedule_form_close(api_url, hours):
     if not api_url or not str(api_url).startswith("http"): return None
-    try: return requests.get(api_url + f"?action=schedule&hours={hours}", timeout=10).text.strip()
+    try: return requests.get(api_url + f"?action=schedule&hours={hours}", timeout=5).text.strip()
     except Exception: return None
 
 def get_deadline_from_db(policy_no):
@@ -212,7 +212,8 @@ def init_db():
     db.email_logs.create_index("timestamp", expireAfterSeconds=604800)
     db.email_logs.create_index([("policy_no", pymongo.ASCENDING), ("status", pymongo.ASCENDING)])
 
-# --- CLOUDFLARE R2 & DB DISCOVERY HELPER ---
+# --- HIGH-SPEED CACHED R2 & MONGO DISCOVERY ---
+@st.cache_data(ttl=60, show_spinner=False)
 def get_live_tenants_and_policies():
     discovered = {}
     if R2_ENABLED:
@@ -339,7 +340,7 @@ def get_cards_from_db(emp_id, policy_no=None):
 def get_members_from_db(emp_id=None):
     db = get_db()
     if emp_id: cursor = db.card_members.find({"emp_id": str(emp_id).strip().upper()}).sort("relationship", -1)
-    else: cursor = db.card_members.find().sort("emp_id", 1)
+    else: cursor = db.card_members.find().sort("emp_id", 1).limit(100)
     results = []
     for doc in cursor:
         doc["id"] = str(doc["_id"])
@@ -365,16 +366,19 @@ def get_bulk_cards_from_db(emp_ids, policy_no=None):
             results.append({"emp_id": row["emp_id"], "card_type": row["card_type"], "policy_no": row["policy_no"], "pdf_data": pdf_data})
     return results
 
-# --- CLOUD ASSETS & LOGS ---
+# --- CACHED ASSETS ---
+@st.cache_data(ttl=60, show_spinner=False)
 def get_asset(asset_name):
     doc = get_db().assets.find_one({"name": asset_name})
     return doc["data"] if doc else None
 
 def save_asset(asset_name, binary_data):
     get_db().assets.update_one({"name": asset_name}, {"$set": {"data": Binary(binary_data)}}, upsert=True)
+    st.cache_data.clear()
 
 def delete_asset(asset_name):
     get_db().assets.delete_one({"name": asset_name})
+    st.cache_data.clear()
 
 def log_email_dispatch(emp_id, name, recipient_email, policy_no, status, error_reason=None, campaign_type="WELCOME_KIT"):
     try:
@@ -432,11 +436,11 @@ def send_multi_ecard_email(recipient_email, subject, body_html, cards_list):
             
         port = int(SMTP_CONFIG["port"])
         if port == 465:
-            with smtplib.SMTP_SSL(SMTP_CONFIG["server"], port, timeout=30) as server:
+            with smtplib.SMTP_SSL(SMTP_CONFIG["server"], port, timeout=25) as server:
                 server.login(SMTP_CONFIG["username"], SMTP_CONFIG["password"])
                 server.sendmail(SMTP_CONFIG["username"], recipient_email, msg.as_string())
         else:
-            with smtplib.SMTP(SMTP_CONFIG["server"], port, timeout=30) as server:
+            with smtplib.SMTP(SMTP_CONFIG["server"], port, timeout=25) as server:
                 server.ehlo(); server.starttls(); server.ehlo()
                 server.login(SMTP_CONFIG["username"], SMTP_CONFIG["password"])
                 server.sendmail(SMTP_CONFIG["username"], recipient_email, msg.as_string())
@@ -480,11 +484,11 @@ def send_launch_email(recipient_email, subject, body_html, guide_asset_key=None,
             
         port = int(SMTP_CONFIG["port"])
         if port == 465:
-            with smtplib.SMTP_SSL(SMTP_CONFIG["server"], port, timeout=30) as server:
+            with smtplib.SMTP_SSL(SMTP_CONFIG["server"], port, timeout=25) as server:
                 server.login(SMTP_CONFIG["username"], SMTP_CONFIG["password"])
                 server.sendmail(SMTP_CONFIG["username"], recipient_email, msg.as_string())
         else:
-            with smtplib.SMTP(SMTP_CONFIG["server"], port, timeout=30) as server:
+            with smtplib.SMTP(SMTP_CONFIG["server"], port, timeout=25) as server:
                 server.ehlo(); server.starttls(); server.ehlo()
                 server.login(SMTP_CONFIG["username"], SMTP_CONFIG["password"])
                 server.sendmail(SMTP_CONFIG["username"], recipient_email, msg.as_string())
@@ -591,7 +595,6 @@ if st.sidebar.button("Logout", type="secondary", use_container_width=True):
     st.session_state.username = ""
     st.rerun()
 
-ocr_engine = load_ocr_engine()
 db = get_db()
 
 # ==============================================================================
@@ -724,8 +727,6 @@ with tab_universal:
     discovered_comp_list = sorted(list(live_tenants_map.keys()))
     
     st.markdown("#### 🏢 Target Corporate Tenant & Policy Setup")
-    st.caption("Select an existing cloud-discovered tenant or provide custom overrides:")
-
     col_c1, col_c2 = st.columns(2)
     with col_c1:
         tenant_opts = ["➕ Custom / New Tenant Name"] + discovered_comp_list
@@ -761,6 +762,7 @@ with tab_universal:
     st.markdown("</div>", unsafe_allow_html=True)
 
     if pdf_files and st.button("🚀 Process & Ingest E-Cards", type="primary", use_container_width=True):
+        ocr_engine = load_ocr_engine()
         progress_bar = st.progress(0)
         extracted_cards = [] 
         for idx, pdf_file in enumerate(pdf_files):
@@ -841,6 +843,7 @@ with tab_universal:
 
         st.session_state.zip_data = zip_buffer.getvalue()
         gc.collect(); progress_bar.progress(1.0)
+        st.cache_data.clear() # Clear cache to show new client immediately
         st.success(f"✅ Ingestion Complete! Saved **{processed_count}** files to Tenant: **{clean_comp_preview}**.")
         if st.session_state.get('zip_data'):
             st.download_button("📥 Download Output ZIP", data=st.session_state.zip_data, file_name=f"{clean_comp_preview}_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
@@ -869,6 +872,7 @@ with tab_modular:
                     save_employee_to_directory(eid, str(m_rows.iloc[0][name_c]), "", p_no, c_name)
                     save_card_to_db(eid, pfile.getvalue(), st.session_state.username, [], p_no, "BASE", c_name)
                     count += 1
+            st.cache_data.clear()
             st.success(f"Ingested {count} Base Cards.")
 
     with col_tm:
@@ -892,6 +896,7 @@ with tab_modular:
                     save_employee_to_directory(eid, str(m_rows.iloc[0][name_c]), "", p_no, c_name)
                     save_card_to_db(eid, pfile.getvalue(), st.session_state.username, [], p_no, "TOPUP", c_name)
                     count += 1
+            st.cache_data.clear()
             st.success(f"Ingested {count} Topup Cards.")
 
 # --- TAB 3: BULK RETRIEVAL ---
@@ -1074,7 +1079,7 @@ with tab_email:
                         synced_c += 1
                 st.success(f"Synced {synced_c} primary employees!"); time.sleep(1); st.rerun()
 
-        # Build Queue
+        # HIGH-SPEED BATCH QUERY: Eliminated N+1 MongoDB Network Calls
         q_filter = {"email_sent": {"$ne": True}}
         if active_scope_policy: q_filter["policy_no"] = active_scope_policy
             
@@ -1082,15 +1087,19 @@ with tab_email:
         ready_jobs = []
         missing_jobs = []
         
-        for e in pending_cards:
-            drec = db.directory.find_one({"emp_id": e["emp_id"]})
-            em = drec.get("email", "") if drec else ""
-            ename = drec.get("name", "Employee") if drec else "Employee"
-            if em in ["nan", "none", "null", "undefined"]: em = ""
+        if pending_cards:
+            all_eids = list(set(e["emp_id"] for e in pending_cards))
+            dir_lookup = {d["emp_id"]: d for d in db.directory.find({"emp_id": {"$in": all_eids}})}
             
-            item = {"EMP ID": e["emp_id"], "Name": ename, "Email": em if em else "⚠️ Missing Email (nan)", "Policy": e["policy_no"]}
-            if em and "@" in em: ready_jobs.append(item)
-            else: missing_jobs.append(item)
+            for e in pending_cards:
+                drec = dir_lookup.get(e["emp_id"])
+                em = drec.get("email", "") if drec else ""
+                ename = drec.get("name", "Employee") if drec else "Employee"
+                if em in ["nan", "none", "null", "undefined"]: em = ""
+                
+                item = {"EMP ID": e["emp_id"], "Name": ename, "Email": em if em else "⚠️ Missing Email (nan)", "Policy": e["policy_no"]}
+                if em and "@" in em: ready_jobs.append(item)
+                else: missing_jobs.append(item)
 
         m_c1, m_c2 = st.columns(2)
         m_c1.metric("🟢 Ready to Dispatch", len(ready_jobs))
@@ -1125,6 +1134,7 @@ with tab_email:
                 st.warning("Pending queue cleared! Counter reset to 0.")
                 time.sleep(1); st.rerun()
 
+        # 7-Day History and 1-Click Retry
         st.markdown("---")
         st.markdown("##### 📊 7-Day Dispatch Audit & Retry Hub")
         logs = list(db.email_logs.find({"campaign_type": "WELCOME_KIT"}).sort("timestamp", -1).limit(50))
@@ -1149,9 +1159,7 @@ with tab_email:
 # ==============================================================================
 with tab_launch:
     st.markdown("### 🚀 Portal Launch & Feedback Broadcast Center")
-    st.markdown("Broadcast the launch of the **CapitUp Benefits Portal (Beta)** to **Tenant HR Leaders** or **Employees** with customized messaging.")
     
-    # Live Tenant Discovery
     live_tenants_map = get_live_tenants_and_policies()
     discovered_comp_list = sorted(list(live_tenants_map.keys()))
     
@@ -1179,13 +1187,9 @@ with tab_launch:
     active_launch_pol = t7_custom_pol.strip().upper() if t7_custom_pol else (sel_l_pol if sel_l_pol != "🌐 All Policies" else None)
 
     st.divider()
-    
-    # --- DUAL SUB-MODULE TABS FOR LAUNCH ---
     subtab_user_launch, subtab_hr_launch = st.tabs(["👤 Employee (User) Launch Broadcast", "🏢 Tenant HR Admin Broadcast"])
 
-    # --------------------------------------------------------------------------
-    # SUB-TAB 1: EMPLOYEE / USER LAUNCH BROADCAST
-    # --------------------------------------------------------------------------
+    # SUB-TAB 1: USER LAUNCH BROADCAST
     with subtab_user_launch:
         col_u_left, col_u_right = st.columns([1.2, 1])
         with col_u_left:
@@ -1285,7 +1289,6 @@ with tab_launch:
                 if st.button(f"🚀 Send {min(len(ready_u), b_lim_u)} User Invites", type="primary", use_container_width=True, disabled=(len(ready_u)==0), key="btn_send_u_launch"):
                     sent_u = 0
                     for u in ready_u[:b_lim_u]:
-                        # PROPER URL-ENCODING FOR PRE-FILLED FORM LINK
                         encoded_n = urllib.parse.quote(str(u.get("name", "Employee")).strip())
                         encoded_eid = urllib.parse.quote(str(u["emp_id"]).strip())
                         encoded_c = urllib.parse.quote(str(active_launch_comp).strip())
@@ -1311,9 +1314,7 @@ with tab_launch:
                     db.directory.update_many(q_u, {"$set": {"launch_announced": True}})
                     st.warning("User queue cleared!"); time.sleep(1); st.rerun()
 
-    # --------------------------------------------------------------------------
-    # SUB-TAB 2: TENANT HR ADMIN BROADCAST (IMAGE 2 FEATURES)
-    # --------------------------------------------------------------------------
+    # SUB-TAB 2: TENANT HR ADMIN BROADCAST
     with subtab_hr_launch:
         col_hr_left, col_hr_right = st.columns([1.2, 1])
         with col_hr_left:
@@ -1335,6 +1336,8 @@ with tab_launch:
                     if up_hrb: save_asset("hr_launch_banner", up_hrb.getvalue()); st.rerun()
                     
             p_url_hr = st.text_input("HR Admin Portal URL:", value="https://admin.capitupindia.com", key="t7_hr_purl")
+            fb_url_base_hr = "https://docs.google.com/forms/d/e/1FAIpQLSdpJ-_GbT1AGeD1tIVEMbvF0DtNexO7fz_0nJE1mdKBu6rrag/viewform?usp=pp_url"
+            fb_url_hr = st.text_input("HR Feedback Form Base URL:", value=fb_url_base_hr, key="t7_hr_fburl")
             l_subj_hr = st.text_input("HR Subject Line:", value="🏢 Introducing Your CapitUp Corporate Benefits Management Workspace", key="t7_hr_subj")
             
             logo_tag_hr = """<div style="text-align: center; margin-bottom: 15px;"><img src="cid:logo_image" alt="CapitUp India Logo" style="height: 60px; width: auto; display: inline-block;" /></div>""" if get_asset("logo") else ""
@@ -1348,9 +1351,7 @@ with tab_launch:
   <!-- BANNER -->
   <div style="padding: 32px 24px;">
     <p style="font-size: 15px; margin-top: 0;">Dear <strong>{{{{name}}}}</strong> (HR / People Ops Team),</p>
-    <p style="font-size: 14px; color: #444;">We are pleased to introduce the all-new <strong>CapitUp Tenant HR Administration Suite</strong> for <strong>{{{{company_name}}}}</strong>.</p>
-    
-    <!-- IMAGE 2 FEATURES HIGHLIGHT -->
+    <p style="font-size: 14px; color: #444;">We are pleased to introduce the all-new <strong>CapitUp Tenant HR Administration Suite (Beta)</strong> for <strong>{{{{company_name}}}}</strong>.</p>
     <div style="background-color: #F4F6F8; border-left: 4px solid #0B1E30; padding: 18px; margin: 24px 0; border-radius: 6px;">
       <h3 style="margin-top: 0; color: #0B1E30; font-size: 14px; text-transform: uppercase;">⚡ Enterprise Capabilities at Your Fingertips</h3>
       <ul style="font-size: 13px; padding-left: 20px; margin: 8px 0; color: #444; line-height: 1.6;">
@@ -1364,6 +1365,13 @@ with tab_launch:
     <div style="text-align: center; margin: 30px 0;">
       <a href="{{{{portal_url}}}}" style="background-color: #0B1E30; color: #ffffff; padding: 15px 36px; text-decoration: none; font-size: 14px; font-weight: bold; border-radius: 6px; display: inline-block; border: 2px solid #C29B38;">🏢 Access Your HR Hub</a>
     </div>
+    <div style="border: 1px solid #C29B38; background-color: #FCF9F2; border-radius: 8px; padding: 20px; margin: 28px 0;">
+      <h3 style="margin-top: 0; color: #0B1E30; font-size: 14px;">🌟 Shape Your Corporate Benefits Experience (HR Beta Feedback)</h3>
+      <p style="font-size: 13px; margin: 8px 0; color: #444;">As our trusted HR partner, your perspective is crucial. Tell us how we can make your benefits management even simpler.</p>
+      <div style="text-align: center; margin-top: 14px;">
+        <a href="{{{{feedback_url}}}}" style="background-color: #23C2A9; color: #ffffff; padding: 12px 26px; text-decoration: none; font-size: 13px; font-weight: bold; border-radius: 6px; display: inline-block;">📝 Share HR Executive Feedback</a>
+      </div>
+    </div>
   </div>
   <div style="background-color: #F4F6F8; padding: 24px; text-align: center; border-top: 1px solid #e5e7eb;">
     <p style="margin: 0; font-size: 12px; color: #0B1E30; font-weight: bold;">CapitUp Corporate Enterprise Support | Dedicated Partner Desk</p>
@@ -1372,7 +1380,8 @@ with tab_launch:
             hr_html = st.text_area("HR EMAIL HTML", value=hr_launch_html, height=180, key="t7_hr_html")
             
             if st.checkbox("👁️ Preview HR Email", key="prev_t7_hr"):
-                rendered_hr = hr_html.replace("{{name}}", st.session_state.username).replace("{{company_name}}", active_launch_comp).replace("{{portal_url}}", p_url_hr)
+                dummy_fb_hr = f"{fb_url_hr}&entry.1752786264=HR101&entry.1314062294=HR%20Partner&entry.2060790789={urllib.parse.quote(active_launch_comp)}"
+                rendered_hr = hr_html.replace("{{name}}", st.session_state.username).replace("{{company_name}}", active_launch_comp).replace("{{portal_url}}", p_url_hr).replace("{{feedback_url}}", dummy_fb_hr)
                 st.components.v1.html(rendered_hr, height=450, scrolling=True)
 
         with col_hr_right:
@@ -1407,9 +1416,16 @@ with tab_launch:
                 if st.button(f"🚀 Send {min(len(ready_hr), b_lim_hr)} HR Invites", type="primary", use_container_width=True, disabled=(len(ready_hr)==0), key="btn_send_hr_launch"):
                     sent_hr = 0
                     for u in ready_hr[:b_lim_hr]:
+                        encoded_n = urllib.parse.quote(str(u.get("name", "HR Partner")).strip())
+                        encoded_eid = urllib.parse.quote(str(u.get("emp_id", "HR")).strip())
+                        encoded_c = urllib.parse.quote(str(active_launch_comp).strip())
+                        dynamic_fb_link_hr = f"{fb_url_hr}&entry.1752786264={encoded_eid}&entry.1314062294={encoded_n}&entry.2060790789={encoded_c}"
+                        
                         body = hr_html.replace("{{name}}", u.get("name", "HR Partner"))\
+                                       .replace("{{emp_id}}", u.get("emp_id", "HR"))\
                                        .replace("{{company_name}}", active_launch_comp)\
-                                       .replace("{{portal_url}}", p_url_hr)
+                                       .replace("{{portal_url}}", p_url_hr)\
+                                       .replace("{{feedback_url}}", dynamic_fb_link_hr)
                                        
                         ok, err = send_launch_email(u["email"], l_subj_hr, body, guide_asset_key="hr_portal_guide", banner_asset_key="hr_launch_banner")
                         if ok:
