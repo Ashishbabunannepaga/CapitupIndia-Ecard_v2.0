@@ -21,6 +21,7 @@ streamlit>=1.30.0
 PyMuPDF>=1.23.0
 opencv-python-headless>=4.8.0
 numpy>=1.24.0
+apt-get
 pandas>=2.0.0
 paddlepaddle>=2.5.0
 paddleocr>=2.7.0
