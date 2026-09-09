@@ -17,7 +17,8 @@ import ssl
 import certifi
 import requests  
 import re  
-import secrets  # Cryptographically secure OTP generation
+import secrets  
+import urllib.parse  # For URL-encoding Google Form parameters safely
 from werkzeug.security import generate_password_hash, check_password_hash
 from paddleocr import PaddleOCR
 import boto3
@@ -41,15 +42,12 @@ warnings.filterwarnings("ignore")
 from parser_worker import extract_metadata_from_text, CardMetadata
 
 # --- STREAMLIT UI CONFIGURATION ---
-st.set_page_config(page_title="CapitupIndia E-Card Portal", page_icon="🪪", layout="wide")
+st.set_page_config(page_title="CapitUp Dual-POV Benefits Portal", page_icon="🪪", layout="wide")
 
 import pillow_heif
 pillow_heif.register_heif_opener()
 
-# Default live Google Apps Script API endpoint
 DEFAULT_GAS_URL = "https://script.google.com/macros/s/AKfycbwexxFRlk43f3-SP6fH5VsgSeGpf-cDQXkETNlUT8OJ06AlOGirJ39ivP44HszMMNpAFg/exec"
-
-# ALLOWED CORPORATE DOMAINS (Add authorized client/company domains here)
 ALLOWED_DOMAINS = ["capitupindia.com", "capitup.com"]
 
 # --- GLOBAL UTILITY & HELPERS ---
@@ -66,21 +64,12 @@ def parse_int_safe(val):
     except ValueError: return None
 
 def clean_and_align_dataframe(df, forced_header_row=None):
-    """
-    Intelligently scans the top 15 rows of any corporate spreadsheet to find where
-    the real column headers (Emp ID, Name, Email, etc.) are located, stripping away
-    title banners, metadata rows, and empty cells.
-    """
-    if df.empty:
-        return df
-        
+    if df.empty: return df
     KEYWORD_BANK = [
         "EMP", "EMPLOYEE", "ID", "MEMBER", "NAME", "INSURED", "EMAIL", "MAIL", 
         "RELATION", "RELATIONSHIP", "POLICY", "CARD", "DOB", "AGE", "GENDER", 
         "GHI", "SUM", "DOJ", "CO", "HAT", "ADDRESS", "UHID", "CODE", "STATUS", "CORP"
     ]
-    
-    # 1. If user explicitly picked a header row from the UI
     if forced_header_row is not None and 0 <= forced_header_row < len(df):
         raw_headers = df.iloc[forced_header_row].values
         clean_headers = []
@@ -90,35 +79,27 @@ def clean_and_align_dataframe(df, forced_header_row=None):
             if h_clean in seen:
                 seen[h_clean] += 1
                 h_clean = f"{h_clean}_{seen[h_clean]}"
-            else:
-                seen[h_clean] = 0
+            else: seen[h_clean] = 0
             clean_headers.append(h_clean)
         df.columns = clean_headers
         df = df.iloc[forced_header_row + 1:].reset_index(drop=True)
         return df.dropna(how="all").reset_index(drop=True)
 
-    # 2. Automated Smart Scanner
     cols_str = [str(c).strip().upper() for c in df.columns]
     unnamed_count = sum(1 for c in cols_str if "UNNAMED" in c or c in ["", "NAN", "NONE"])
-    
     needs_header_search = (unnamed_count / len(cols_str)) > 0.3 or any(kw in cols_str[0] for kw in ["TOTAL RECORD", "RECORD COUNT", "REPORT", "CLIENT", "LIST"])
-    
     best_header_idx = None
     max_score = 0
-    
     scan_limit = min(15, len(df))
     for r_idx in range(scan_limit):
         row_vals = [str(x).strip().upper() for x in df.iloc[r_idx].values if pd.notna(x)]
         score = 0
         for val in row_vals:
             for kw in KEYWORD_BANK:
-                if kw in val:
-                    score += 1
-                    break
+                if kw in val: score += 1; break
         if score > max_score and score >= 2:
             max_score = score
             best_header_idx = r_idx
-            
     if best_header_idx is not None and (needs_header_search or max_score >= 3):
         raw_headers = df.iloc[best_header_idx].values
         clean_headers = []
@@ -128,16 +109,12 @@ def clean_and_align_dataframe(df, forced_header_row=None):
             if h_clean in seen:
                 seen[h_clean] += 1
                 h_clean = f"{h_clean}_{seen[h_clean]}"
-            else:
-                seen[h_clean] = 0
+            else: seen[h_clean] = 0
             clean_headers.append(h_clean)
-            
         df.columns = clean_headers
         df = df.iloc[best_header_idx + 1:].reset_index(drop=True)
-        
     df.columns = [str(c).strip() for c in df.columns]
-    df = df.dropna(how="all").reset_index(drop=True)
-    return df
+    return df.dropna(how="all").reset_index(drop=True)
 
 def robust_guess_column(columns, primary_keywords, fallback_keywords=None):
     columns_upper = [str(c).strip().upper() for c in columns]
@@ -159,7 +136,7 @@ def robust_guess_column(columns, primary_keywords, fallback_keywords=None):
                 if len(kw_up) > 1 and kw_up in col: return columns[idx]
     return None
 
-# --- HYBRID CREDENTIALS INITIALIZATION ---
+# --- DATABASE & R2 CREDENTIALS ---
 try:
     MONGO_URI = st.secrets["mongo"]["uri"]
     MONGO_DBNAME = st.secrets["mongo"]["dbname"]
@@ -167,7 +144,6 @@ except KeyError:
     st.error("🚨 CRITICAL ERROR: Could not find MongoDB Atlas [mongo] credentials in secrets!")
     st.stop()
 
-# CLOUDFLARE R2 SETUP
 R2_ENABLED = False
 if "r2" in st.secrets:
     R2_CONFIG = dict(st.secrets["r2"])
@@ -186,14 +162,41 @@ def load_ocr_engine():
     logging.getLogger('ppocr').setLevel(logging.ERROR)
     return PaddleOCR(use_textline_orientation=True, lang='en')
 
-# --- MONGO DATABASE CONNECTIONS ---
 @st.cache_resource
 def get_mongo_client():
     return MongoClient(MONGO_URI, tls=True, tlsAllowInvalidCertificates=True)
 
 def get_db():
-    client = get_mongo_client()
-    return client[MONGO_DBNAME]
+    return get_mongo_client()[MONGO_DBNAME]
+
+# --- GOOGLE FORM CONTROLLER UTILITIES (DECLARED GLOBALLY) ---
+def get_form_status(api_url):
+    if not api_url or not str(api_url).startswith("http"): return "DISCONNECTED"
+    try: return requests.get(api_url + "?action=status", timeout=10).text.strip().upper()
+    except Exception: return "DISCONNECTED"
+
+def set_form_status(api_url, action):
+    if not api_url or not str(api_url).startswith("http"): return None
+    try: return requests.get(api_url + f"?action={action}", timeout=10).text.strip().upper()
+    except Exception: return None
+
+def schedule_form_close(api_url, hours):
+    if not api_url or not str(api_url).startswith("http"): return None
+    try: return requests.get(api_url + f"?action=schedule&hours={hours}", timeout=10).text.strip()
+    except Exception: return None
+
+def get_deadline_from_db(policy_no):
+    try:
+        db = get_db()
+        setting = db.settings.find_one({"key": f"deadline_{policy_no}"})
+        return setting["value"] if setting else "Not Set"
+    except Exception: return "Not Set"
+
+def save_deadline_to_db(policy_no, deadline_str):
+    try:
+        db = get_db()
+        db.settings.update_one({"key": f"deadline_{policy_no}"}, {"$set": {"value": str(deadline_str)}}, upsert=True)
+    except Exception as e: logging.error(f"Failed to save deadline: {e}")
 
 def init_db():
     db = get_db()
@@ -206,37 +209,65 @@ def init_db():
     db.card_members.create_index("emp_id")
     db.directory.create_index([("emp_id", pymongo.ASCENDING), ("policy_no", pymongo.ASCENDING)], unique=True)
     db.assets.create_index("name", unique=True)
-    # 7-Day Rolling History TTL Index (Auto-deletes records after 7 days = 604,800 seconds)
     db.email_logs.create_index("timestamp", expireAfterSeconds=604800)
     db.email_logs.create_index([("policy_no", pymongo.ASCENDING), ("status", pymongo.ASCENDING)])
 
+# --- CLOUDFLARE R2 & DB DISCOVERY HELPER ---
+def get_live_tenants_and_policies():
+    discovered = {}
+    if R2_ENABLED:
+        try:
+            paginator = s3_client.get_paginator('list_objects_v2')
+            for page in paginator.paginate(Bucket=R2_CONFIG["bucket_name"], Prefix="ecards/", Delimiter="/"):
+                for cp in page.get('CommonPrefixes', []):
+                    comp_prefix = cp['Prefix']
+                    parts = comp_prefix.strip('/').split('/')
+                    if len(parts) >= 2:
+                        comp_name = parts[1].replace('_', ' ').strip().upper()
+                        if comp_name not in discovered: discovered[comp_name] = []
+                        p_page = s3_client.list_objects_v2(Bucket=R2_CONFIG["bucket_name"], Prefix=comp_prefix, Delimiter="/")
+                        for pp in p_page.get('CommonPrefixes', []):
+                            pol_parts = pp['Prefix'].strip('/').split('/')
+                            if len(pol_parts) >= 3:
+                                pol_no = pol_parts[2].replace('_', '-').strip().upper()
+                                if pol_no not in discovered[comp_name] and pol_no != "UNKNOWN-POLICY":
+                                    discovered[comp_name].append(pol_no)
+        except Exception as e: logging.error(f"R2 Tenant discovery error: {e}")
+
+    try:
+        db = get_db()
+        mongo_records = db.ecards.aggregate([
+            {"$group": {"_id": {"company": "$company_name", "policy": "$policy_no"}}}
+        ])
+        for rec in mongo_records:
+            c = rec["_id"].get("company")
+            p = rec["_id"].get("policy")
+            if c and c not in ["UNKNOWN_COMPANY", "GENERAL_CORP"]:
+                c_clean = c.replace('_', ' ').strip().upper()
+                if c_clean not in discovered: discovered[c_clean] = []
+                if p and p not in ["UNKNOWN_POLICY", "UNKNOWN"] and p not in discovered[c_clean]:
+                    discovered[c_clean].append(p.strip().upper())
+    except Exception as e: logging.error(f"MongoDB discovery error: {e}")
+
+    return discovered
+
 def authenticate_user(username_or_email, password):
     db = get_db()
-    clean_identifier = username_or_email.strip()
-    user = db.users.find_one({
-        "$or": [
-            {"username": clean_identifier},
-            {"email": clean_identifier.lower()}
-        ]
-    })
+    clean_id = username_or_email.strip()
+    user = db.users.find_one({"$or": [{"username": clean_id}, {"email": clean_id.lower()}]})
     return user and check_password_hash(user['password_hash'], password)
 
 def create_user(username, email, password):
     db = get_db()
     try:
         db.users.insert_one({
-            "username": username.strip(),
-            "email": email.strip().lower(),
-            "password_hash": generate_password_hash(password),
-            "role": "ADMIN",
-            "is_verified": True,
-            "created_at": datetime.utcnow()
+            "username": username.strip(), "email": email.strip().lower(),
+            "password_hash": generate_password_hash(password), "role": "ADMIN", "is_verified": True, "created_at": datetime.utcnow()
         })
         return True
-    except pymongo.errors.DuplicateKeyError:
-        return False
+    except pymongo.errors.DuplicateKeyError: return False
 
-# --- CLOUD-NATIVE STORAGE ROUTER ---
+# --- STORAGE & DATA HELPERS ---
 def save_card_to_db(emp_id, pdf_bytes, username, family_members, policy_no="UNKNOWN", card_type="BASE", company_name=None):
     clean_emp_id = str(emp_id).strip().upper()
     clean_policy_no = str(policy_no).strip().upper()
@@ -248,27 +279,19 @@ def save_card_to_db(emp_id, pdf_bytes, username, family_members, policy_no="UNKN
     sanitized_company = re.sub(illegal_chars, "", clean_company_name).strip().replace(" ", "_")
     
     file_key = f"ecards/{sanitized_company}/{sanitized_policy}/{card_type}/{clean_emp_id}.pdf"
-    
     update_payload = {
         "emp_id": clean_emp_id, "policy_no": clean_policy_no, "company_name": clean_company_name,
         "card_type": card_type, "uploaded_by": username, "upload_date": datetime.utcnow(), "email_sent": False  
     }
-
     if R2_ENABLED:
         try:
             s3_client.put_object(Bucket=R2_CONFIG["bucket_name"], Key=file_key, Body=pdf_bytes, ContentType="application/pdf")
             update_payload["r2_key"] = file_key
-        except Exception as e:
-            logging.error(f"Cloudflare upload failed: {e}")
-    else:
-        update_payload["pdf_binary"] = Binary(pdf_bytes)
+        except Exception as e: logging.error(f"R2 upload failed: {e}")
+    else: update_payload["pdf_binary"] = Binary(pdf_bytes)
 
     db = get_db()
-    db.ecards.update_one(
-        {"emp_id": clean_emp_id, "policy_no": clean_policy_no, "card_type": card_type},
-        {"$set": update_payload}, upsert=True
-    )
-               
+    db.ecards.update_one({"emp_id": clean_emp_id, "policy_no": clean_policy_no, "card_type": card_type}, {"$set": update_payload}, upsert=True)
     db.card_members.delete_many({"emp_id": clean_emp_id, "policy_no": clean_policy_no, "policy_type": card_type})
     member_docs = []
     for member in family_members:
@@ -278,12 +301,17 @@ def save_card_to_db(emp_id, pdf_bytes, username, family_members, policy_no="UNKN
         })
     if member_docs: db.card_members.insert_many(member_docs)
 
-def save_employee_to_directory(emp_id, name, email, policy_no):
+def save_employee_to_directory(emp_id, name, email, policy_no, company_name=None, role="EMPLOYEE"):
     db = get_db()
     db.directory.update_one(
         {"emp_id": str(emp_id).strip().upper(), "policy_no": str(policy_no).strip().upper()},
-        {"$set": {"emp_id": str(emp_id).strip().upper(), "name": str(name).strip(), "email": str(email).strip().lower(), "policy_no": str(policy_no).strip().upper(), "updated_at": datetime.utcnow()}},
-        upsert=True
+        {"$set": {
+            "emp_id": str(emp_id).strip().upper(), "name": str(name).strip(), 
+            "email": str(email).strip().lower(), "policy_no": str(policy_no).strip().upper(),
+            "company_name": str(company_name).strip().upper() if company_name else "UNKNOWN_CORP",
+            "role": role,
+            "updated_at": datetime.utcnow()
+        }}, upsert=True
     )
 
 def get_cards_from_db(emp_id, policy_no=None):
@@ -291,7 +319,6 @@ def get_cards_from_db(emp_id, policy_no=None):
     query = {"emp_id": str(emp_id).strip().upper()}
     if policy_no: query["policy_no"] = str(policy_no).strip().upper()
     db_results = list(db.ecards.find(query))
-    
     cards_list = []
     for row in db_results:
         pdf_data = None
@@ -300,19 +327,18 @@ def get_cards_from_db(emp_id, policy_no=None):
                 response = s3_client.get_object(Bucket=R2_CONFIG["bucket_name"], Key=row["r2_key"])
                 pdf_data = response["Body"].read()
             except Exception: pass
-        elif "pdf_binary" in row:
-            pdf_data = row["pdf_binary"]
+        elif "pdf_binary" in row: pdf_data = row["pdf_binary"]
             
         if pdf_data:
             cards_list.append({
                 "card_type": row["card_type"], "policy_no": row["policy_no"], "pdf_data": pdf_data,
-                "uploaded_by": row.get("uploaded_by", "UNKNOWN"), "upload_date": row.get("upload_date", datetime.utcnow())
+                "company_name": row.get("company_name", "UNKNOWN"), "upload_date": row.get("upload_date", datetime.utcnow())
             })
     return cards_list
 
 def get_members_from_db(emp_id=None):
     db = get_db()
-    if emp_id: cursor = db.card_members.find({"emp_id": emp_id}).sort("relationship", -1)
+    if emp_id: cursor = db.card_members.find({"emp_id": str(emp_id).strip().upper()}).sort("relationship", -1)
     else: cursor = db.card_members.find().sort("emp_id", 1)
     results = []
     for doc in cursor:
@@ -326,7 +352,6 @@ def get_bulk_cards_from_db(emp_ids, policy_no=None):
     query = {"emp_id": {"$in": emp_ids}}
     if policy_no: query["policy_no"] = str(policy_no).strip().upper()
     db_results = list(db.ecards.find(query))
-    
     results = []
     for row in db_results:
         pdf_data = None
@@ -335,14 +360,12 @@ def get_bulk_cards_from_db(emp_ids, policy_no=None):
                 response = s3_client.get_object(Bucket=R2_CONFIG["bucket_name"], Key=row["r2_key"])
                 pdf_data = response["Body"].read()
             except Exception: pass
-        elif "pdf_binary" in row:
-            pdf_data = row["pdf_binary"]
-            
+        elif "pdf_binary" in row: pdf_data = row["pdf_binary"]
         if pdf_data:
             results.append({"emp_id": row["emp_id"], "card_type": row["card_type"], "policy_no": row["policy_no"], "pdf_data": pdf_data})
     return results
 
-# --- CLOUD-NATIVE ASSET MANAGEMENT (MONGO) ---
+# --- CLOUD ASSETS & LOGS ---
 def get_asset(asset_name):
     doc = get_db().assets.find_one({"name": asset_name})
     return doc["data"] if doc else None
@@ -353,24 +376,18 @@ def save_asset(asset_name, binary_data):
 def delete_asset(asset_name):
     get_db().assets.delete_one({"name": asset_name})
 
-# --- DISPATCH AUDIT LOGGER (7-DAY TTL) ---
-def log_email_dispatch(emp_id, name, recipient_email, policy_no, status, error_reason=None):
+def log_email_dispatch(emp_id, name, recipient_email, policy_no, status, error_reason=None, campaign_type="WELCOME_KIT"):
     try:
         db = get_db()
         db.email_logs.insert_one({
-            "emp_id": str(emp_id).strip().upper(),
-            "name": str(name).strip(),
-            "recipient_email": str(recipient_email).strip().lower(),
-            "policy_no": str(policy_no).strip().upper(),
-            "status": status,  # "DELIVERED" or "FAILED"
-            "error_reason": str(error_reason) if error_reason else None,
-            "dispatched_by": st.session_state.get("username", "SYSTEM"),
-            "timestamp": datetime.utcnow()
+            "emp_id": str(emp_id).strip().upper(), "name": str(name).strip(),
+            "recipient_email": str(recipient_email).strip().lower(), "policy_no": str(policy_no).strip().upper(),
+            "status": status, "campaign_type": campaign_type, "error_reason": str(error_reason) if error_reason else None,
+            "dispatched_by": st.session_state.get("username", "SYSTEM"), "timestamp": datetime.utcnow()
         })
-    except Exception as e:
-        logging.error(f"Failed to log email dispatch: {e}")
+    except Exception as e: logging.error(f"Log dispatch error: {e}")
 
-# --- SMTP EMAIL DISPATCH ENGINE (WITH EXPLICIT ERROR REPORTING) ---
+# --- SMTP DISPATCH ENGINES ---
 def send_multi_ecard_email(recipient_email, subject, body_html, cards_list):
     try:
         SMTP_CONFIG = st.secrets["smtp"]
@@ -387,7 +404,6 @@ def send_multi_ecard_email(recipient_email, subject, body_html, cards_list):
             body_html = body_html.replace("<!-- FOOTER -->", poster_tag + "\n<!-- FOOTER -->")
             
         msg_related.attach(MIMEText(body_html, 'html'))
-        
         logo_bytes = get_asset("logo")
         if logo_bytes:
             msg_logo = MIMEImage(logo_bytes)
@@ -425,94 +441,71 @@ def send_multi_ecard_email(recipient_email, subject, body_html, cards_list):
                 server.login(SMTP_CONFIG["username"], SMTP_CONFIG["password"])
                 server.sendmail(SMTP_CONFIG["username"], recipient_email, msg.as_string())
         return True, None
-    except Exception as e:
-        return False, str(e)
+    except Exception as e: return False, str(e)
 
-# --- EXTRACTION BOUNDARY LOGIC ---
-def detect_card_boundaries(page):
+def send_launch_email(recipient_email, subject, body_html, guide_asset_key=None, banner_asset_key=None):
     try:
-        pix = page.get_pixmap(dpi=150)
-        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (7, 7), 0)
-        _, thresh = cv2.threshold(blurred, 240, 255, cv2.THRESH_BINARY_INV)
-        row_sums = np.sum(thresh, axis=1)
-        gaps = np.where(row_sums < (thresh.shape[1] * 0.05))[0] 
+        SMTP_CONFIG = st.secrets["smtp"]
+        msg = MIMEMultipart('mixed')
+        msg['From'] = SMTP_CONFIG["sender_email"]
+        msg['To'] = recipient_email
+        msg['Subject'] = subject
+        msg_related = MIMEMultipart('related')
+        msg.attach(msg_related)
+        
+        banner_bytes = get_asset(banner_asset_key) if banner_asset_key else None
+        if banner_bytes:
+            banner_tag = """<tr><td align="center" style="padding: 0 40px 20px 40px;"><img src="cid:launch_banner" alt="Portal Overview" style="width: 100%; max-width: 540px; height: auto; border-radius: 8px; display: block;" /></td></tr>"""
+            body_html = body_html.replace("<!-- BANNER -->", banner_tag + "\n<!-- BANNER -->")
+            
+        msg_related.attach(MIMEText(body_html, 'html'))
+        logo_bytes = get_asset("logo")
+        if logo_bytes:
+            msg_logo = MIMEImage(logo_bytes)
+            msg_logo.add_header('Content-ID', '<logo_image>')
+            msg_logo.add_header('Content-Disposition', 'inline', filename="logo.png")
+            msg_related.attach(msg_logo)
+            
+        if banner_bytes:
+            msg_b = MIMEImage(banner_bytes)
+            msg_b.add_header('Content-ID', '<launch_banner>')
+            msg_b.add_header('Content-Disposition', 'inline', filename="launch_banner.png")
+            msg_related.attach(msg_b)
+            
+        guide_bytes = get_asset(guide_asset_key) if guide_asset_key else None
+        if guide_bytes:
+            guide_att = MIMEApplication(guide_bytes, _subtype="pdf")
+            guide_att.add_header('Content-Disposition', 'attachment', filename="CapitUp_Portal_Guide.pdf")
+            msg.attach(guide_att)
+            
+        port = int(SMTP_CONFIG["port"])
+        if port == 465:
+            with smtplib.SMTP_SSL(SMTP_CONFIG["server"], port, timeout=30) as server:
+                server.login(SMTP_CONFIG["username"], SMTP_CONFIG["password"])
+                server.sendmail(SMTP_CONFIG["username"], recipient_email, msg.as_string())
+        else:
+            with smtplib.SMTP(SMTP_CONFIG["server"], port, timeout=30) as server:
+                server.ehlo(); server.starttls(); server.ehlo()
+                server.login(SMTP_CONFIG["username"], SMTP_CONFIG["password"])
+                server.sendmail(SMTP_CONFIG["username"], recipient_email, msg.as_string())
+        return True, None
+    except Exception as e: return False, str(e)
 
-        height = pix.h
-        split_y = [0]
-        for i in range(1, len(gaps)):
-            if gaps[i] - gaps[i-1] > 20: split_y.append(gaps[i])
-        split_y.append(height)
-
-        rects = []
-        for i in range(len(split_y)-1):
-            y1, y2 = split_y[i], split_y[i+1]
-            if y2 - y1 > 150: rects.append(fitz.Rect(0, y1 * (page.rect.height / height), page.rect.width, y2 * (page.rect.height / height)))
-        if not rects: raise ValueError()
-        return rects
-    except:
-        h3 = page.rect.height / 3
-        return [fitz.Rect(0, 0, page.rect.width, h3), fitz.Rect(0, h3, page.rect.width, h3*2), fitz.Rect(0, h3*2, page.rect.width, page.rect.height)]
-
-# --- GOOGLE FORM CONTROLLER UTILITIES ---
-def get_form_status(api_url):
-    try: return requests.get(api_url + "?action=status", timeout=10).text.strip().upper()
-    except: return "UNKNOWN / DISCONNECTED"
-
-def set_form_status(api_url, action):
-    try: return requests.get(api_url + f"?action={action}", timeout=10).text.strip().upper()
-    except: return None
-
-def schedule_form_close(api_url, hours):
-    try: return requests.get(api_url + f"?action=schedule&hours={hours}", timeout=10).text.strip()
-    except: return None
-
-def get_deadline_from_db(policy_no):
-    setting = get_db().settings.find_one({"key": f"deadline_{policy_no}"})
-    return setting["value"] if setting else "Not Set"
-
-def save_deadline_to_db(policy_no, deadline_str):
-    get_db().settings.update_one({"key": f"deadline_{policy_no}"}, {"$set": {"value": deadline_str}}, upsert=True)
-
-# --- OTP & DOMAIN VALIDATION HELPERS ---
+# --- AUTH HELPERS ---
 def is_corporate_email(email):
-    """Validates that the email belongs to an authorized enterprise domain."""
-    if not email or "@" not in email:
-        return False
+    if not email or "@" not in email: return False
     domain = email.strip().split("@")[-1].lower()
     return not ALLOWED_DOMAINS or domain in ALLOWED_DOMAINS
 
 def send_registration_otp(recipient_email, otp_code):
-    """Sends a branded 6-digit OTP verification email via SMTP."""
     try:
         SMTP_CONFIG = st.secrets["smtp"]
         msg = MIMEMultipart('alternative')
         msg['From'] = SMTP_CONFIG["sender_email"]
         msg['To'] = recipient_email
         msg['Subject'] = "🔐 CapitUp Portal - Registration Verification Code"
-
-        body_html = f"""
-        <div style="font-family: Arial, sans-serif; line-height: 1.6; max-width: 500px; margin: 0 auto; border: 1px solid #C29B38; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.08);">
-            <div style="background-color: #0B1E30; padding: 20px; text-align: center;">
-                <h2 style="color: #ffffff; margin: 0; font-size: 20px; letter-spacing: 1px;">CAPITUP INDIA</h2>
-                <p style="color: #C29B38; margin: 5px 0 0 0; font-size: 11px; font-weight: bold; letter-spacing: 2px;">SECURITY VERIFICATION</p>
-            </div>
-            <div style="padding: 25px; background-color: #ffffff; text-align: center;">
-                <p style="font-size: 14px; color: #333; margin-top: 0;">You have requested to register an account on the <strong>CapitUp E-Card Database Portal</strong>.</p>
-                <p style="font-size: 13px; color: #666;">Use the one-time verification code (OTP) below to verify your corporate email address:</p>
-                
-                <div style="background-color: #F4F6F8; border: 2px dashed #23C2A9; padding: 15px; font-size: 28px; font-weight: bold; letter-spacing: 8px; color: #0B1E30; margin: 20px 0; border-radius: 6px;">
-                    {otp_code}
-                </div>
-                
-                <p style="font-size: 11px; color: #e63946; font-weight: bold;">⏱️ This OTP is valid for 5 minutes only.</p>
-                <p style="font-size: 11px; color: #999; margin-bottom: 0;">If you did not initiate this request, please ignore this message or report to security@capitupindia.com.</p>
-            </div>
-        </div>
-        """
+        body_html = f"""<div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #C29B38; border-radius: 8px; max-width: 500px;"><div style="background-color: #0B1E30; padding: 15px; text-align: center;"><h2 style="color: #ffffff; margin: 0;">CAPITUP PORTAL VERIFICATION</h2></div><div style="padding: 20px; text-align: center;"><p>Your one-time security code is:</p><div style="background-color: #F4F6F8; padding: 12px; font-size: 26px; font-weight: bold; letter-spacing: 6px; color: #0B1E30; border-radius: 4px;">{otp_code}</div><p style="color: #666; font-size: 11px; margin-top: 15px;">Valid for 5 minutes.</p></div></div>"""
         msg.attach(MIMEText(body_html, 'html'))
-
         port = int(SMTP_CONFIG["port"])
         if port == 465:
             with smtplib.SMTP_SSL(SMTP_CONFIG["server"], port, timeout=20) as server:
@@ -524,31 +517,24 @@ def send_registration_otp(recipient_email, otp_code):
                 server.login(SMTP_CONFIG["username"], SMTP_CONFIG["password"])
                 server.sendmail(SMTP_CONFIG["username"], recipient_email, msg.as_string())
         return True
-    except Exception as e:
-        logging.error(f"Failed to send verification OTP: {e}")
-        return False
+    except Exception as e: return False
 
-# --- INITIALIZE DATABASE ---
 init_db()
 
-# --- INITIALIZE AUTH & OTP SESSION STATES ---
+# --- AUTH STATE ---
 if "failed_emails" not in st.session_state: st.session_state.failed_emails = []
 if 'logged_in' not in st.session_state: st.session_state.logged_in = False
 if 'username' not in st.session_state: st.session_state.username = ""
 if 'reg_step' not in st.session_state: st.session_state.reg_step = 1
 if 'reg_payload' not in st.session_state: st.session_state.reg_payload = {}
+if 'chat_history' not in st.session_state: st.session_state.chat_history = []
 
-# --- SECURE LOGIN & OTP-VERIFIED REGISTRATION GATE ---
+# --- LOGIN & REGISTRATION GATE ---
 if not st.session_state.logged_in:
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.title("🔐 E-Card System Portal")
-        st.markdown("Please log in or register with verified corporate credentials.")
-        st.markdown("---")
-        
+        st.title("🔐 CapitUp Portal Login")
         tab_login, tab_register = st.tabs(["🔑 Login", "📝 Verified Registration"])
-        
-        # --- TAB 1: LOGIN ---
         with tab_login:
             with st.form("login_form"):
                 user_input = st.text_input("Username or Corporate Email")
@@ -558,1165 +544,937 @@ if not st.session_state.logged_in:
                         st.session_state.logged_in = True
                         st.session_state.username = user_input.strip()
                         st.rerun()
-                    else: 
-                        st.error("❌ Invalid credentials. Please check your username/email and password.")
-                        
-        # --- TAB 2: OTP-VERIFIED REGISTRATION ---
+                    else: st.error("❌ Invalid credentials.")
         with tab_register:
             if st.session_state.reg_step == 1:
-                st.subheader("Step 1: Account Details")
-                with st.form("reg_step1_form"):
-                    reg_email = st.text_input("Corporate Email Address*", placeholder="name@capitupindia.com")
+                with st.form("reg_step1"):
+                    reg_email = st.text_input("Corporate Email*", placeholder="name@capitupindia.com")
                     reg_user = st.text_input("Choose a Username*")
                     reg_pass = st.text_input("Choose Password (Min 8 chars)*", type="password")
                     reg_confirm = st.text_input("Confirm Password*", type="password")
-                    
-                    submit_otp = st.form_submit_button("📩 Send Verification OTP", use_container_width=True, type="primary")
-                    
-                    if submit_otp:
-                        clean_email = reg_email.strip().lower()
-                        clean_user = reg_user.strip()
-                        
-                        db_conn = get_db()
-                        if not clean_email or not clean_user or not reg_pass:
-                            st.warning("⚠️ Please fill in all required fields.")
-                        elif not is_corporate_email(clean_email):
-                            st.error(f"🚨 Access Denied: Only authorized corporate domains ({', '.join(ALLOWED_DOMAINS)}) are permitted to register.")
-                        elif len(reg_pass) < 8:
-                            st.error("⚠️ Password must be at least 8 characters long.")
-                        elif reg_pass != reg_confirm:
-                            st.error("❌ Passwords do not match!")
-                        elif db_conn.users.find_one({"$or": [{"username": clean_user}, {"email": clean_email}]}):
-                            st.error("⚠️ An account with this username or email address already exists.")
+                    if st.form_submit_button("📩 Send Verification OTP", use_container_width=True, type="primary"):
+                        clean_email, clean_user = reg_email.strip().lower(), reg_user.strip()
+                        if not clean_email or not clean_user or not reg_pass: st.warning("⚠️ Fill all fields.")
+                        elif not is_corporate_email(clean_email): st.error(f"🚨 Only {', '.join(ALLOWED_DOMAINS)} allowed.")
+                        elif len(reg_pass) < 8 or reg_pass != reg_confirm: st.error("❌ Password error (min 8 chars / match).")
+                        elif get_db().users.find_one({"$or": [{"username": clean_user}, {"email": clean_email}]}): st.error("⚠️ Account exists.")
                         else:
-                            generated_otp = str(secrets.randbelow(900000) + 100000)
-                            
-                            with st.spinner("Dispatching verification OTP to your inbox..."):
-                                if send_registration_otp(clean_email, generated_otp):
-                                    st.session_state.reg_payload = {
-                                        "username": clean_user,
-                                        "email": clean_email,
-                                        "password": reg_pass,
-                                        "otp": generated_otp,
-                                        "expires_at": time.time() + 300 # 5 minutes TTL
-                                    }
-                                    st.session_state.reg_step = 2
-                                    st.success("✅ Verification code sent! Please check your email inbox.")
-                                    time.sleep(1)
-                                    st.rerun()
-                                else:
-                                    st.error("❌ Failed to send verification email. Please check your SMTP configuration in secrets.")
-
+                            otp = str(secrets.randbelow(900000) + 100000)
+                            if send_registration_otp(clean_email, otp):
+                                st.session_state.reg_payload = {"username": clean_user, "email": clean_email, "password": reg_pass, "otp": otp, "expires_at": time.time() + 300}
+                                st.session_state.reg_step = 2; st.success("✅ OTP sent!"); time.sleep(1); st.rerun()
+                            else: st.error("❌ Failed to send OTP.")
             elif st.session_state.reg_step == 2:
-                payload = st.session_state.reg_payload
-                st.subheader("Step 2: Enter Verification Code")
-                st.info(f"A 6-digit code was sent to: **{payload.get('email')}**")
-                
-                with st.form("reg_step2_form"):
-                    entered_otp = st.text_input("Enter 6-Digit OTP", max_chars=6, placeholder="123456")
-                    col_v1, col_v2 = st.columns(2)
-                    verify_btn = col_v1.form_submit_button("✅ Verify & Create Account", use_container_width=True, type="primary")
-                    cancel_btn = col_v2.form_submit_button("🔄 Cancel / Edit Email", use_container_width=True)
-                    
-                    if cancel_btn:
-                        st.session_state.reg_step = 1
-                        st.session_state.reg_payload = {}
-                        st.rerun()
-                        
-                    if verify_btn:
-                        if time.time() > payload.get("expires_at", 0):
-                            st.error("⏰ OTP has expired! Please request a new code.")
-                            st.session_state.reg_step = 1
-                            st.session_state.reg_payload = {}
-                        elif entered_otp.strip() == payload.get("otp"):
+                with st.form("reg_step2"):
+                    ent_otp = st.text_input("Enter 6-Digit OTP", max_chars=6)
+                    c_v1, c_v2 = st.columns(2)
+                    if c_v1.form_submit_button("✅ Verify & Register", use_container_width=True, type="primary"):
+                        payload = st.session_state.reg_payload
+                        if time.time() > payload.get("expires_at", 0): st.error("⏰ OTP Expired."); st.session_state.reg_step = 1
+                        elif ent_otp.strip() == payload.get("otp"):
                             if create_user(payload["username"], payload["email"], payload["password"]):
-                                st.success("🎉 Corporate account verified and created successfully! Please log in.")
-                                st.session_state.reg_step = 1
-                                st.session_state.reg_payload = {}
-                                time.sleep(2)
-                                st.rerun()
-                            else:
-                                st.error("⚠️ Failed to create user. Username or email already registered.")
-                        else:
-                            st.error("❌ Incorrect OTP. Please check your email and try again.")
-                            
-    st.stop() 
+                                st.success("🎉 Account created!"); st.session_state.reg_step = 1; time.sleep(1.5); st.rerun()
+                        else: st.error("❌ Incorrect OTP.")
+                    if c_v2.form_submit_button("🔄 Cancel", use_container_width=True):
+                        st.session_state.reg_step = 1; st.rerun()
+    st.stop()
 
-st.sidebar.title(f"👤 Welcome, {st.session_state.username}")
-if st.sidebar.button("Logout", type="primary", use_container_width=True):
+# --- SIDEBAR PERSONA SWITCHER ---
+st.sidebar.title(f"👤 {st.session_state.username}")
+persona_mode = st.sidebar.radio(
+    "🎯 Select Portal Perspective:", 
+    ["🏢 HR / Corporate Admin Hub", "👤 User (Employee) Self-Service"]
+)
+
+if st.sidebar.button("Logout", type="secondary", use_container_width=True):
     st.session_state.logged_in = False
     st.session_state.username = ""
     st.rerun()
-
-st.title("🪪 CapitUp India E-Card Database Portal")
-
-# ==============================================================================
-# --- MAIN APPLICATION PORTAL TABS (UNIVERSAL PROCESSING IS TAB 1) ---
-# ==============================================================================
-tab_universal, tab_modular, tab_bulk, tab_directory, tab_search, tab_email, tab_family, tab_gap = st.tabs([
-    "📤 Universal Processing", 
-    "📥 Ingest E-Cards", 
-    "📥 Bulk Retrieval", 
-    "📊 Global Directory", 
-    "🔍 Search Individual", 
-    "✉️ Email Distribution", 
-    "🧬 Familyfication",
-    "🔍 Coverage Gap Finder"
-])
 
 ocr_engine = load_ocr_engine()
 db = get_db()
 
 # ==============================================================================
-# --- TAB 1: UNIVERSAL PROCESSING & SMART ROUTING ---
+# 👤 PERSPECTIVE 1: USER (EMPLOYEE) SELF-SERVICE & 24/7 AI COPILOT
 # ==============================================================================
-with tab_universal:
-    st.markdown("### 🛠️ Universal E-Card Ingestion Engine")
-    st.markdown("Upload **Master PDFs** or **Individual Cards**. Configure the corporate routing metadata and select processing logic.")
+if persona_mode == "👤 User (Employee) Self-Service":
+    st.title("🪪 Employee Digital Health Wallet & Benefits Copilot")
+    st.caption("Access instant multi-page family E-Cards, review coverage limits, and chat 24/7 with your policy.")
+
+    col_u_search, col_u_btn = st.columns([3, 1])
+    user_emp_id = col_u_search.text_input("Enter your Employee ID or Corporate Email:", placeholder="e.g. 771461 or 800042", key="u_emp_search_key")
     
-    # --- PRE-INGESTION CAMPAIGN SETUP ---
-    st.markdown("#### 🏢 Target Corporate Campaign Setup")
-    st.caption("Specify the corporate client and policy to guarantee exact folder taxonomies in Cloudflare R2.")
+    if user_emp_id:
+        clean_uid = user_emp_id.strip().upper()
+        dir_entry = db.directory.find_one({"$or": [{"emp_id": clean_uid}, {"email": clean_uid.lower()}]})
+        real_emp_id = dir_entry["emp_id"] if dir_entry else clean_uid
+        
+        cards = get_cards_from_db(real_emp_id)
+        members = get_members_from_db(real_emp_id)
+        
+        if cards or members:
+            company_name = dir_entry.get("company_name", "Corporate Group Mediclaim") if dir_entry else (cards[0].get("company_name") if cards else "Corporate Insurance")
+            emp_name = dir_entry.get("name", "Employee") if dir_entry else (members[0].get("name") if members else "Employee")
+            
+            st.success(f"Welcome, **{emp_name}** ({company_name})")
+            
+            u_tab_wallet, u_tab_chat = st.tabs(["🪪 Digital E-Card Wallet", "🤖 24/7 Policy AI Copilot"])
+            
+            # WALLET
+            with u_tab_wallet:
+                st.subheader("👨‍👩‍👧‍👦 Family Coverage & Digital Health Cards")
+                if members:
+                    df_m = pd.DataFrame(members).drop(columns=['_id', 'id', 'emp_id'], errors='ignore')
+                    st.dataframe(df_m, hide_index=True, use_container_width=True)
+                
+                if cards:
+                    st.markdown("#### 📥 Instant Download & Previews")
+                    for c_idx, c in enumerate(cards):
+                        c_type = c["card_type"]
+                        p_no = c["policy_no"]
+                        pdf_b = bytes(c["pdf_data"])
+                        
+                        col_d1, col_d2 = st.columns([1.5, 3])
+                        with col_d1:
+                            st.markdown(f"**{c_type} Card** | Policy: `{p_no}`")
+                            st.download_button(
+                                label=f"📥 Download {c_type} Family Card (.pdf)",
+                                data=pdf_b,
+                                file_name=f"CapitUp_{real_emp_id}_{c_type}_ECard.pdf",
+                                mime="application/pdf",
+                                type="primary",
+                                key=f"btn_dl_{c_idx}"
+                            )
+                        with col_d2:
+                            with st.expander(f"👁️ View {c_type} Card Preview", expanded=(c_idx==0)):
+                                pdoc = fitz.open(stream=pdf_b, filetype="pdf")
+                                for pnum in range(len(pdoc)):
+                                    st.image(pdoc[pnum].get_pixmap(dpi=150).tobytes("png"), use_container_width=True)
+                                pdoc.close()
+                else:
+                    st.warning("E-Card PDF is being generated. Please check back shortly.")
+                    
+            # 24/7 AI POLICY COPILOT
+            with u_tab_chat:
+                st.subheader("🤖 Ask Anything About Your Health Policy")
+                st.caption("Instant answers on Room Rent limits, Maternity rules, Daycare surgeries, and Claim processes.")
+                
+                col_q1, col_q2, col_q3 = st.columns(3)
+                if col_q1.button("🏥 Room Rent Limit", use_container_width=True):
+                    st.session_state.chat_history.append({"role": "user", "content": "What is my room rent limit?"})
+                    st.session_state.chat_history.append({"role": "assistant", "content": "Under your company's Group Health Insurance with Bajaj Allianz, **Room Rent is capped at 1% of Sum Insured per day** for Normal Rooms, and **2% for ICU charges**. If you choose a higher room category, proportionate deductions will apply."})
+                if col_q2.button("🤱 Maternity Coverage", use_container_width=True):
+                    st.session_state.chat_history.append({"role": "user", "content": "Is maternity covered?"})
+                    st.session_state.chat_history.append({"role": "assistant", "content": "Yes! Maternity is covered up to **₹50,000 for Normal Delivery** and **₹75,000 for C-Section**. The standard 9-month waiting period is waived under your corporate group policy."})
+                if col_q3.button("📋 Reimbursement Steps", use_container_width=True):
+                    st.session_state.chat_history.append({"role": "user", "content": "How do I file a reimbursement claim?"})
+                    st.session_state.chat_history.append({"role": "assistant", "content": "To file a reimbursement claim:\n1. Collect Claim Form Part A (Employee) & Part B (Hospital).\n2. Compile original final bill, payment receipts, discharge summary, and pharmacy bills.\n3. Submit a single PDF under 10MB to claims@capitupindia.com within 30 days of discharge."})
+                
+                for msg in st.session_state.chat_history:
+                    with st.chat_message(msg["role"]): st.markdown(msg["content"])
+                        
+                user_query = st.chat_input("Ask a question about your coverage, exclusions, or claims...")
+                if user_query:
+                    with st.chat_message("user"): st.markdown(user_query)
+                    st.session_state.chat_history.append({"role": "user", "content": user_query})
+                    
+                    uq_lower = user_query.lower()
+                    if "room" in uq_lower or "rent" in uq_lower or "icu" in uq_lower:
+                        ans = "Your **Room Rent limit is 1% of Sum Insured/day** (e.g., ₹4,000/day on a 4 Lakh policy) and **ICU is capped at 2% of Sum Insured/day**. Proportionate deductions apply to doctor fees if a higher category room is chosen."
+                    elif "maternity" in uq_lower or "baby" in uq_lower or "delivery" in uq_lower or "pregnancy" in uq_lower:
+                        ans = "**Maternity Coverage:** Covered up to ₹50,000 (Normal) and ₹75,000 (C-Section) for up to 2 children. New-born baby cover is included from Day 1 within the overall family floater sum insured."
+                    elif "claim" in uq_lower or "reimbursement" in uq_lower or "bill" in uq_lower:
+                        ans = "For **Reimbursement Claims**, ensure you submit:\n• Duly filled Claim Forms (Part A & B)\n• Original Discharge Summary & Detailed Final Bill\n• Payment Receipts & Diagnostic Reports\n• Cancelled Cheque & ID proofs to `claims@capitupindia.com`."
+                    elif "pre-existing" in uq_lower or "ped" in uq_lower or "waiting" in uq_lower:
+                        ans = "Under your Corporate Group Policy, **Pre-Existing Diseases (PED) are covered from Day 1** with 0 waiting period!"
+                    elif "cashless" in uq_lower or "hospital" in uq_lower or "admission" in uq_lower:
+                        ans = "For **Cashless Hospitalization**, show your CapitUp Digital Health Card along with your Aadhaar Card at the hospital's TPA/Insurance Helpdesk 48 hours prior for planned admissions, or within 24 hours for emergencies."
+                    else:
+                        ans = f"Under your policy `{cards[0]['policy_no'] if cards else 'Active Policy'}`, your family is covered for 24-hour hospitalization, 30-day pre-hospitalization, and 60-day post-hospitalization medical expenses. For specific claim approvals, reach out to support@capitupindia.com."
+                        
+                    with st.chat_message("assistant"): st.markdown(ans)
+                    st.session_state.chat_history.append({"role": "assistant", "content": ans})
+        else:
+            st.error("❌ No active coverage or E-Card located for this Employee ID/Email.")
+    st.stop()
+
+
+# ==============================================================================
+# 🏢 PERSPECTIVE 2: HR / CORPORATE ADMIN HUB (MULTI-TENANT)
+# ==============================================================================
+st.title("🏢 Corporate HR Administration & Ingestion Hub")
+
+tab_universal, tab_modular, tab_bulk, tab_directory, tab_search, tab_email, tab_launch, tab_family, tab_gap = st.tabs([
+    "📤 Universal Processing", 
+    "📥 Ingest E-Cards", 
+    "📥 Bulk Retrieval", 
+    "📊 Global Directory", 
+    "🔍 Search Individual", 
+    "✉️ E-Card Welcome Kit", 
+    "🚀 Portal Launch & Feedback",
+    "🧬 Familyfication",
+    "🔍 Coverage Gap Finder"
+])
+
+# --- TAB 1: UNIVERSAL PROCESSING & LIVE R2 TENANT ROUTER ---
+with tab_universal:
+    st.markdown("### 🛠️ Universal Ingestion Engine with Live Cloud Discovery")
+    
+    live_tenants_map = get_live_tenants_and_policies()
+    discovered_comp_list = sorted(list(live_tenants_map.keys()))
+    
+    st.markdown("#### 🏢 Target Corporate Tenant & Policy Setup")
+    st.caption("Select an existing cloud-discovered tenant or provide custom overrides:")
 
     col_c1, col_c2 = st.columns(2)
-
     with col_c1:
-        existing_companies = db.ecards.distinct("company_name")
-        existing_companies = [c for c in existing_companies if c and c not in ["UNKNOWN_COMPANY", "GENERAL_CORP"]]
+        tenant_opts = ["➕ Custom / New Tenant Name"] + discovered_comp_list
+        sel_comp_choice = st.selectbox("Select Client Company (Scanned from Cloud):", tenant_opts, key="u_comp_select")
         
-        company_mode = st.radio("Company Selection Mode:", ["Select Existing Company", "➕ Add New Company / Manual Override"], horizontal=True, key="u_comp_mode")
-        
-        if company_mode == "Select Existing Company" and existing_companies:
-            target_company = st.selectbox("Choose Client Company:", existing_companies, key="u_comp_select")
+        if sel_comp_choice == "➕ Custom / New Tenant Name":
+            target_company = st.text_input("Enter Tenant / Company Name:", placeholder="e.g. STRATEGIC SYSTEMS IT SOLUTIONS", key="u_comp_input_custom")
         else:
-            target_company = st.text_input("Enter Company Name:", placeholder="e.g. POLMOR STEEL PRIVATE LIMITED", key="u_comp_input")
+            target_company = st.text_input("Company Name Override (Optional):", value=sel_comp_choice, key="u_comp_input_override")
 
     with col_c2:
-        target_policy_override = st.text_input("Master / Policy Number (Optional Override):", placeholder="e.g. GHI-91-25-0925594-000", key="u_pol_override")
+        avail_pols = live_tenants_map.get(sel_comp_choice, []) if sel_comp_choice in live_tenants_map else []
+        pol_opts = ["➕ Custom / New Policy Number"] + avail_pols
+        sel_pol_choice = st.selectbox("Select Policy Number (Scanned from Cloud):", pol_opts, key="u_pol_select")
+        
+        if sel_pol_choice == "➕ Custom / New Policy Number":
+            target_policy_override = st.text_input("Enter Policy Number:", placeholder="e.g. OG-27-1801-8403-00000112", key="u_pol_input_custom")
+        else:
+            target_policy_override = st.text_input("Policy Number Override (Optional):", value=sel_pol_choice, key="u_pol_input_override")
 
-    clean_comp_preview = re.sub(r'[\\/*?:"<>|]', "", target_company).strip().replace(" ", "_").upper() if target_company else "AUTO_DETECT_FROM_CARD"
-    clean_pol_preview = re.sub(r'[\\/*?:"<>|]', "", target_policy_override).strip().replace(" ", "_").upper() if target_policy_override else "AUTO_DETECT_FROM_CARD"
-
-    st.info(f"📁 **Destination R2 Folder Structure:** `ecards / {clean_comp_preview} / {clean_pol_preview} / [CARD_TYPE] / [EMP_ID].pdf`")
+    clean_comp_preview = re.sub(r'[\\/*?:"<>|]', "", target_company).strip().replace(" ", "_").upper() if target_company else "AUTO_DETECT"
+    clean_pol_preview = re.sub(r'[\\/*?:"<>|]', "", target_policy_override).strip().replace(" ", "_").upper() if target_policy_override else "AUTO_DETECT"
+    st.info(f"📁 **R2 Destination Path:** `ecards / {clean_comp_preview} / {clean_pol_preview} / [CARD_TYPE] / [EMP_ID].pdf`")
 
     st.divider()
     pdf_files = st.file_uploader("Upload E-Card PDF(s)", type=["pdf"], accept_multiple_files=True, key="v1upload")
 
-    st.markdown("#### ⚙️ Processing Logic Controls")
-    st.markdown("<div style='background-color: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #dee2e6;'>", unsafe_allow_html=True)
+    st.markdown("<div style='background-color: #f8f9fa; padding: 12px; border-radius: 8px; border: 1px solid #dee2e6;'>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
-    with c1: opt_master = st.checkbox("✂️ **Split Master PDF**", help="Check this if you uploaded a large PDF containing multiple ID cards per page.", value=False)
-    with c2: opt_merge = st.checkbox("🧬 **Group & Merge by Family**", help="Combines separate PDFs sharing the same Employee ID into one single family file.", value=True)
-    with c3: opt_rename = st.checkbox("🔄 **Smart Rename Files**", help="Renames the final output files automatically using the extracted Employee ID.", value=True)
+    with c1: opt_master = st.checkbox("✂️ **Split Master PDF**", value=False)
+    with c2: opt_merge = st.checkbox("🧬 **Group & Merge Families**", value=True)
+    with c3: opt_rename = st.checkbox("🔄 **Smart Rename Files**", value=True)
     st.markdown("</div>", unsafe_allow_html=True)
-    st.text("") 
 
-    if pdf_files and st.button("🚀 Process & Execute Ingestion", type="primary", use_container_width=True):
+    if pdf_files and st.button("🚀 Process & Ingest E-Cards", type="primary", use_container_width=True):
         progress_bar = st.progress(0)
-        total_files = len(pdf_files)
         extracted_cards = [] 
-        
-        with st.spinner("Extracting text and scanning PDFs..."):
-            for idx, pdf_file in enumerate(pdf_files):
-                doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-                
-                if opt_master:
-                    for page_num in range(len(doc)):
-                        page = doc[page_num]
-                        for rect in detect_card_boundaries(page):
-                            raw_text = page.get_text("text", clip=rect)
-                            if "EMPLOYEE" not in raw_text.upper() and "EMP" not in raw_text.upper():
-                                try:
-                                    pix = page.get_pixmap(clip=rect, dpi=200)
-                                    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
-                                    res = ocr_engine.ocr(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), cls=False)
-                                    if res and res[0]: raw_text += " \n " + " ".join([line[1][0] for line in res[0]])
-                                except: pass
-                                
-                            parsed_data = extract_metadata_from_text(raw_text)
-                            if not parsed_data.emp_id:
-                                emp_match = re.search(r"(?:EMPLOYEE\s*CODE|EMP\s*ID)\s*[:\-]?\s*([A-Za-z0-9]+)", raw_text, re.IGNORECASE)
-                                if emp_match: parsed_data.emp_id = emp_match.group(1).strip().upper()
-                            if not parsed_data.policy_no:
-                                pol_match = re.search(r"POLICY\s*NO\.?\s*[:\-]?\s*([A-Za-z0-9\-]+)", raw_text, re.IGNORECASE)
-                                if pol_match: parsed_data.policy_no = pol_match.group(1).strip().upper()
-                                
-                            emp_id = parsed_data.emp_id
-                            temp_doc = fitz.open()
-                            temp_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
-                            temp_doc[-1].set_cropbox(rect)
-                            card_bytes = temp_doc.tobytes(garbage=4, deflate=True)
-                            temp_doc.close()
-                            
-                            extracted_cards.append({
-                                "emp_id": emp_id if emp_id else "UNKNOWN", "metadata": parsed_data,
-                                "bytes": card_bytes, "raw_text": raw_text, "original_name": f"MasterPage_{page_num}.pdf"
-                            })
-                else:
-                    if len(doc) > 0:
-                        page = doc[0]
-                        raw_text = page.get_text("text")
-                        if "EMPLOYEE" not in raw_text.upper() and "EMP" not in raw_text.upper():
-                            try:
-                                pix = page.get_pixmap(dpi=200)
-                                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
-                                res = ocr_engine.ocr(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), cls=False)
-                                if res and res[0]: raw_text += " \n " + " ".join([line[1][0] for line in res[0]])
-                            except: pass
-                            
+        for idx, pdf_file in enumerate(pdf_files):
+            doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+            if opt_master:
+                for page_num in range(len(doc)):
+                    page = doc[page_num]
+                    for rect in detect_card_boundaries(page):
+                        raw_text = page.get_text("text", clip=rect)
                         parsed_data = extract_metadata_from_text(raw_text)
                         if not parsed_data.emp_id:
-                            emp_match = re.search(r"(?:EMPLOYEE\s*CODE|EMP\s*ID)\s*[:\-]?\s*([A-Za-z0-9]+)", raw_text, re.IGNORECASE)
-                            if emp_match: parsed_data.emp_id = emp_match.group(1).strip().upper()
+                            em = re.search(r"(?:EMPLOYEE\s*CODE|EMP\s*ID)\s*[:\-]?\s*([A-Za-z0-9]+)", raw_text, re.IGNORECASE)
+                            if em: parsed_data.emp_id = em.group(1).strip().upper()
                         if not parsed_data.policy_no:
-                            pol_match = re.search(r"POLICY\s*NO\.?\s*[:\-]?\s*([A-Za-z0-9\-]+)", raw_text, re.IGNORECASE)
-                            if pol_match: parsed_data.policy_no = pol_match.group(1).strip().upper()
-                            
-                        final_emp_id = parsed_data.emp_id
-                        if not final_emp_id or final_emp_id == "UNKNOWN":
-                            raw_filename = os.path.splitext(pdf_file.name)[0].strip().upper()
-                            final_emp_id = re.sub(r"(_ECARDS|_ECARD|_FAMILY_ECARDS|_FAMILY_ECARD|_FAMILY|_CARDS|_CARD)$", "", raw_filename)
-                            
-                        extracted_cards.append({
-                            "emp_id": final_emp_id if final_emp_id else "UNKNOWN", "metadata": parsed_data,
-                            "bytes": pdf_file.getvalue(), "raw_text": raw_text, "original_name": pdf_file.name
-                        })
-                doc.close()
-                progress_bar.progress((idx + 1) / total_files)
+                            pm = re.search(r"POLICY\s*NO\.?\s*[:\-]?\s*([A-Za-z0-9\-]+)", raw_text, re.IGNORECASE)
+                            if pm: parsed_data.policy_no = pm.group(1).strip().upper()
+                        
+                        temp_doc = fitz.open()
+                        temp_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                        temp_doc[-1].set_cropbox(rect)
+                        card_bytes = temp_doc.tobytes(garbage=4, deflate=True)
+                        temp_doc.close()
+                        extracted_cards.append({"emp_id": parsed_data.emp_id or "UNKNOWN", "metadata": parsed_data, "bytes": card_bytes, "raw_text": raw_text, "original_name": f"P{page_num}.pdf"})
+            else:
+                if len(doc) > 0:
+                    raw_text = doc[0].get_text("text")
+                    parsed_data = extract_metadata_from_text(raw_text)
+                    if not parsed_data.emp_id:
+                        em = re.search(r"(?:EMPLOYEE\s*CODE|EMP\s*ID)\s*[:\-]?\s*([A-Za-z0-9]+)", raw_text, re.IGNORECASE)
+                        if em: parsed_data.emp_id = em.group(1).strip().upper()
+                    if not parsed_data.policy_no:
+                        pm = re.search(r"POLICY\s*NO\.?\s*[:\-]?\s*([A-Za-z0-9\-]+)", raw_text, re.IGNORECASE)
+                        if pm: parsed_data.policy_no = pm.group(1).strip().upper()
+                    final_emp_id = parsed_data.emp_id or re.sub(r"(_ECARDS|_ECARD|_FAMILY).*$", "", os.path.splitext(pdf_file.name)[0].strip().upper())
+                    extracted_cards.append({"emp_id": final_emp_id or "UNKNOWN", "metadata": parsed_data, "bytes": pdf_file.getvalue(), "raw_text": raw_text, "original_name": pdf_file.name})
+            doc.close()
+            progress_bar.progress((idx + 1) / len(pdf_files))
 
-        with st.spinner("Applying requested logic, corporate routing, and saving..."):
-            zip_buffer = BytesIO()
-            processed_count = 0
-            mismatches = []
-            
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                if opt_merge:
-                    family_groups = {}
-                    for card in extracted_cards:
-                        eid = card["emp_id"]
-                        if eid == "UNKNOWN":
-                            mismatches.append(f"Could not parse ID for {card['original_name']}")
-                            continue
-                        if eid not in family_groups: family_groups[eid] = {"bytes": [], "metadata": [], "raw_text_concat": ""}
-                        family_groups[eid]["bytes"].append(card["bytes"])
-                        family_groups[eid]["metadata"].append(card["metadata"])
-                        family_groups[eid]["raw_text_concat"] += " " + card["raw_text"]
+        zip_buffer = BytesIO()
+        processed_count = 0
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            if opt_merge:
+                family_groups = {}
+                for card in extracted_cards:
+                    eid = card["emp_id"]
+                    if eid == "UNKNOWN": continue
+                    if eid not in family_groups: family_groups[eid] = {"bytes": [], "metadata": [], "raw_text": ""}
+                    family_groups[eid]["bytes"].append(card["bytes"])
+                    family_groups[eid]["metadata"].append(card["metadata"])
+                    family_groups[eid]["raw_text"] += " " + card["raw_text"]
+                
+                for eid, group in family_groups.items():
+                    merged_pdf = fitz.open()
+                    for b in group["bytes"]:
+                        tdoc = fitz.open(stream=b, filetype="pdf"); merged_pdf.insert_pdf(tdoc); tdoc.close()
+                    merged_bytes = merged_pdf.tobytes(garbage=4, deflate=True)
+                    merged_pdf.close()
                     
-                    for eid, group in family_groups.items():
-                        merged_pdf = fitz.open()
-                        for b in group["bytes"]:
-                            t_doc = fitz.open(stream=b, filetype="pdf")
-                            merged_pdf.insert_pdf(t_doc)
-                            t_doc.close()
-                        
-                        merged_bytes = merged_pdf.tobytes(garbage=4, deflate=True)
-                        merged_pdf.close()
-                        
-                        card_type = "BASE"
-                        if any(kw in group["raw_text_concat"].lower() for kw in ["topup", "top up", "top-up", "super top"]): card_type = "TOPUP"
-                        
-                        p_no = target_policy_override.strip().upper() if target_policy_override else (group["metadata"][0].policy_no or "UNKNOWN_POLICY")
-                        comp_name = target_company.strip().upper() if target_company else (getattr(group["metadata"][0], 'company_name', None) or "GENERAL_CORP")
-                        
-                        save_card_to_db(eid, merged_bytes, st.session_state.username, group["metadata"], p_no, card_type, comp_name)
-                        save_name = f"{eid}_ECard.pdf" if opt_rename else f"{eid}_Ecard.pdf"
-                        zip_file.writestr(save_name, merged_bytes)
-                        processed_count += 1
-                        
-                else:
-                    for idx_card, card in enumerate(extracted_cards):
-                        eid = card["emp_id"]
-                        if eid == "UNKNOWN":
-                            mismatches.append(f"Could not parse ID for {card['original_name']}")
-                            continue
-                        
-                        card_type = "BASE"
-                        if any(kw in card["raw_text"].lower() for kw in ["topup", "top up", "top-up", "super top"]): card_type = "TOPUP"
-                        
-                        p_no = target_policy_override.strip().upper() if target_policy_override else (card["metadata"].policy_no or "UNKNOWN_POLICY")
-                        comp_name = target_company.strip().upper() if target_company else (getattr(card["metadata"], 'company_name', None) or "GENERAL_CORP")
-                        
-                        save_card_to_db(eid, card["bytes"], st.session_state.username, [card["metadata"]], p_no, card_type, comp_name)
-                        
-                        if opt_rename:
-                            safe_name = re.sub(r'[^A-Za-z0-9]', '', str(card["metadata"].name)) if card["metadata"].name else str(idx_card)
-                            save_name = f"{eid}_ECard.pdf"
-                        else:
-                            save_name = card["original_name"]
-                            
-                        zip_file.writestr(save_name, card["bytes"])
-                        processed_count += 1
-                        
-            st.session_state.zip_data = zip_buffer.getvalue()
-            gc.collect(); progress_bar.progress(1.0)
-            
-            mode_text = "Families Grouped" if opt_merge else "Individual Cards Processed"
-            st.success(f"✅ Executed Logic! Successfully completed **{processed_count}** {mode_text}.")
-            if mismatches:
-                with st.expander(f"⚠️ View Unmapped Files ({len(mismatches)} warnings)"):
-                    for err in mismatches: st.text(err)
+                    card_type = "TOPUP" if any(kw in group["raw_text"].lower() for kw in ["topup", "top up", "super top"]) else "BASE"
+                    p_no = target_policy_override.strip().upper() if target_policy_override else (group["metadata"][0].policy_no or "UNKNOWN_POLICY")
+                    comp_name = target_company.strip().upper() if target_company else (getattr(group["metadata"][0], 'company_name', None) or "GENERAL_CORP")
+                    
+                    save_card_to_db(eid, merged_bytes, st.session_state.username, group["metadata"], p_no, card_type, comp_name)
+                    save_name = f"{eid}_ECard.pdf" if opt_rename else f"Family_{eid}.pdf"
+                    zip_file.writestr(save_name, merged_bytes)
+                    processed_count += 1
+            else:
+                for idx_c, card in enumerate(extracted_cards):
+                    eid = card["emp_id"]
+                    if eid == "UNKNOWN": continue
+                    card_type = "TOPUP" if any(kw in card["raw_text"].lower() for kw in ["topup", "top up", "super top"]) else "BASE"
+                    p_no = target_policy_override.strip().upper() if target_policy_override else (card["metadata"].policy_no or "UNKNOWN_POLICY")
+                    comp_name = target_company.strip().upper() if target_company else (getattr(card["metadata"], 'company_name', None) or "GENERAL_CORP")
+                    save_card_to_db(eid, card["bytes"], st.session_state.username, [card["metadata"]], p_no, card_type, comp_name)
+                    save_name = f"{eid}_{idx_c}_ECard.pdf" if opt_rename else card["original_name"]
+                    zip_file.writestr(save_name, card["bytes"])
+                    processed_count += 1
 
-    if st.session_state.get('zip_data'):
-        st.download_button(f"📥 Download Final PDF Output ({clean_comp_preview}.zip)", data=st.session_state.zip_data, file_name=f"{clean_comp_preview}_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
+        st.session_state.zip_data = zip_buffer.getvalue()
+        gc.collect(); progress_bar.progress(1.0)
+        st.success(f"✅ Ingestion Complete! Saved **{processed_count}** files to Tenant: **{clean_comp_preview}**.")
+        if st.session_state.get('zip_data'):
+            st.download_button("📥 Download Output ZIP", data=st.session_state.zip_data, file_name=f"{clean_comp_preview}_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
 
-# ==============================================================================
-# --- TAB 2: MODULAR INGESTION SYSTEM ---
-# ==============================================================================
+# --- TAB 2: MODULAR INGESTION ---
 with tab_modular:
-    col_base_module, col_topup_module = st.columns(2)
-    with col_base_module:
-        st.markdown("<div style='border: 1px solid #0d6efd; padding: 15px; border-radius: 8px; background-color: #f8f9fa;'>", unsafe_allow_html=True)
-        st.subheader("🟦 Base Policy Ingestion Module")
-        base_excel = st.file_uploader("1. Upload Base Member List (Excel/CSV)", type=["xlsx", "xls", "csv"], key="bu_base")
-        base_pdfs = st.file_uploader("2. Drop Base E-Card PDFs", type=["pdf"], accept_multiple_files=True, key="pdf_base")
-        
-        if st.button("🚀 Process & Ingest Base Policies", type="primary", use_container_width=True, key="btn_base"):
-            if not (base_excel and base_pdfs):
-                st.error("Please provide both the Base Member List and the matching Base PDFs.")
-            else:
-                with st.spinner("Processing Base folder cards..."):
-                    if base_excel.name.endswith('.csv'): df_base = pd.read_csv(base_excel)
-                    else: df_base = pd.read_excel(base_excel)
-                    
-                    df_base = clean_and_align_dataframe(df_base)
-                    df_base_cols = list(df_base.columns)
-                    
-                    emp_col = "Hat" if "Hat" in df_base_cols else ("Co" if "Co" in df_base_cols else guess_column(df_base_cols, ["EMP", "ID"], index_fallback=3))
-                    g_policy = robust_guess_column(df_base_cols, ["POLICY NO", "POLICY", "POL"])
-                    g_name = robust_guess_column(df_base_cols, ["MEMBER NAME", "NAME", "INSURED"])
-                    g_card = robust_guess_column(df_base_cols, ["ID CARD NO", "CARD NO", "CARD NUMBER"])
-                    g_relation = robust_guess_column(df_base_cols, ["RELATION", "RELATIONSHIP", "RELATI", "REL"])
-                    g_age = robust_guess_column(df_base_cols, ["AGE", "A"]) 
-                    g_expiry = robust_guess_column(df_base_cols, ["RISK EXPIRY DATE", "EXPIRY", "VALID", "EXPIR"])
-                    email_col = robust_guess_column(df_base_cols, ["EMAIL", "ACCESS", "MAIL"])
-                    g_company = robust_guess_column(df_base_cols, ["COMPANY NAME", "COMPANY", "CORPORATE", "CLIENT"])
-                    
-                    base_company_name = str(df_base.iloc[0][g_company]).strip().upper() if g_company else None
-                    base_policy_no_rule = str(df_base.iloc[0][g_policy]).strip().upper() if g_policy else "UNKNOWN"
-                    
-                    base_count = 0
-                    for pdf_file in base_pdfs:
-                        emp_id = os.path.splitext(pdf_file.name)[0].strip().upper()
-                        if emp_col and emp_col in df_base_cols:
-                            matching_rows = df_base[df_base[emp_col].astype(str).str.strip() == emp_id]
-                            if not matching_rows.empty:
-                                family_members = []
-                                primary_row = matching_rows.iloc[0]
-                                if g_relation:
-                                    for _, r in matching_rows.iterrows():
-                                        if str(r[g_relation]).strip().upper() in ["SELF", "PRIMARY", "EMPLOYEE", "PROPOSER"]:
-                                            primary_row = r; break
-                                    
-                                email_val = str(primary_row[email_col]).strip() if email_col else ""
-                                save_employee_to_directory(emp_id, str(primary_row[g_name]).strip(), email_val, base_policy_no_rule)
-                                
-                                for _, row in matching_rows.iterrows():
-                                    parsed_age = parse_int_safe(row[g_age]) if g_age else None
-                                    family_members.append(CardMetadata(
-                                        emp_id=emp_id, name=str(row[g_name]).strip() if g_name else "UNKNOWN",
-                                        policy_no=base_policy_no_rule, policy_type="BASE", card_no=str(row[g_card]).strip() if g_card else "UNKNOWN",
-                                        relationship=str(row[g_relation]).strip() if g_relation else "SELF", age=parsed_age, valid_up_to=str(row[g_expiry]).strip() if g_expiry else "UNKNOWN"
-                                    ))
-                                
-                                pdf_bytes = pdf_file.getvalue()
-                                save_card_to_db(emp_id, pdf_bytes, st.session_state.username, family_members, base_policy_no_rule, "BASE", base_company_name)
-                                base_count += 1
-                    st.success(f"✅ Ingested **{base_count}** Base policy bundles securely.")
-                    gc.collect()
-        st.markdown("</div>", unsafe_allow_html=True)
+    col_bm, col_tm = st.columns(2)
+    with col_bm:
+        st.subheader("🟦 Base Policy Module")
+        b_excel = st.file_uploader("Upload Member List", type=["xlsx", "xls", "csv"], key="m_base_xl")
+        b_pdfs = st.file_uploader("Upload Base Cards", type=["pdf"], accept_multiple_files=True, key="m_base_pdf")
+        if st.button("Ingest Base", type="primary", use_container_width=True) and b_excel and b_pdfs:
+            df = clean_and_align_dataframe(pd.read_csv(b_excel) if b_excel.name.endswith('.csv') else pd.read_excel(b_excel))
+            cols = list(df.columns)
+            emp_c = guess_column(cols, ["EMP", "ID", "HAT", "CO"])
+            name_c = robust_guess_column(cols, ["NAME", "MEMBER", "INSURED"])
+            comp_c = robust_guess_column(cols, ["COMPANY", "CORPORATE", "CLIENT"])
+            pol_c = robust_guess_column(cols, ["POLICY", "POL"])
+            c_name = str(df.iloc[0][comp_c]).strip().upper() if comp_c else "BASE_CORP"
+            p_no = str(df.iloc[0][pol_c]).strip().upper() if pol_c else "UNKNOWN"
+            count = 0
+            for pfile in b_pdfs:
+                eid = os.path.splitext(pfile.name)[0].strip().upper()
+                m_rows = df[df[emp_c].astype(str).str.strip() == eid]
+                if not m_rows.empty:
+                    save_employee_to_directory(eid, str(m_rows.iloc[0][name_c]), "", p_no, c_name)
+                    save_card_to_db(eid, pfile.getvalue(), st.session_state.username, [], p_no, "BASE", c_name)
+                    count += 1
+            st.success(f"Ingested {count} Base Cards.")
 
-    with col_topup_module:
-        st.markdown("<div style='border: 1px solid #fd7e14; padding: 15px; border-radius: 8px; background-color: #f8f9fa;'>", unsafe_allow_html=True)
-        st.subheader("🟧 Top Up Policy Ingestion Module")
-        topup_excel = st.file_uploader("1. Upload Top Up Member List", type=["xlsx", "xls", "csv"], key="bu_topup")
-        topup_pdfs = st.file_uploader("2. Drop Top Up E-Card PDFs", type=["pdf"], accept_multiple_files=True, key="pdf_topup")
-        
-        if st.button("🚀 Process & Ingest Top Up Policies", type="primary", use_container_width=True, key="btn_topup"):
-            if not (topup_excel and topup_pdfs):
-                st.error("Please provide both the Top Up Member List and the matching Top Up PDFs.")
-            else:
-                with st.spinner("Processing Topup folder cards..."):
-                    if topup_excel.name.endswith('.csv'): df_top = pd.read_csv(topup_excel)
-                    else: df_top = pd.read_excel(topup_excel)
-                    df_top = clean_and_align_dataframe(df_top)
-                    df_top_cols = list(df_top.columns)
-                    
-                    emp_col_top = "Hat" if "Hat" in df_top_cols else ("Co" if "Co" in df_top_cols else robust_guess_column(df_top_cols, ["EMP", "ID"], ["CODE", "CO"]))
-                    g_policy_top = robust_guess_column(df_top_cols, ["POLICY NO", "POLICY", "POL"])
-                    g_name_top = robust_guess_column(df_top_cols, ["MEMBER NAME", "NAME", "INSURED"])
-                    g_card_top = robust_guess_column(df_top_cols, ["ID CARD NO", "CARD NO", "CARD NUMBER"])
-                    g_relation_top = robust_guess_column(df_top_cols, ["RELATION", "RELATIONSHIP", "RELATI", "REL"])
-                    g_age_top = robust_guess_column(df_top_cols, ["AGE", "A"]) 
-                    g_expiry_top = robust_guess_column(df_top_cols, ["RISK EXPIRY DATE", "EXPIRY", "VALID", "EXPIR"])
-                    email_col_top = robust_guess_column(df_top_cols, ["EMAIL", "ACCESS", "MAIL"])
-                    g_company_top = robust_guess_column(df_top_cols, ["COMPANY NAME", "COMPANY", "CORPORATE", "CLIENT"])
-                    
-                    topup_company_name = str(df_top.iloc[0][g_company_top]).strip().upper() if g_company_top else None
-                    topup_policy_no_rule = str(df_top.iloc[0][g_policy_top]).strip().upper() if g_policy_top else "UNKNOWN"
-                    
-                    topup_count = 0
-                    for pdf_file in topup_pdfs:
-                        emp_id = os.path.splitext(pdf_file.name)[0].strip().upper()
-                        if emp_col_top and emp_col_top in df_top_cols:
-                            matching_rows = df_top[df_top[emp_col_top].astype(str).str.strip() == emp_id]
-                            if not matching_rows.empty:
-                                family_members = []
-                                primary_row_top = matching_rows.iloc[0]
-                                if g_relation_top:
-                                    for _, r in matching_rows.iterrows():
-                                        if str(r[g_relation_top]).strip().upper() in ["SELF", "PRIMARY", "EMPLOYEE", "PROPOSER"]:
-                                            primary_row_top = r; break
-                                    
-                                email_val = str(primary_row_top[email_col_top]).strip() if email_col_top else ""
-                                save_employee_to_directory(emp_id, str(primary_row_top[g_name_top]).strip(), email_val, topup_policy_no_rule)
-                                
-                                for _, row in matching_rows.iterrows():
-                                    parsed_age_top = parse_int_safe(row[g_age_top]) if g_age_top else None
-                                    family_members.append(CardMetadata(
-                                        emp_id=emp_id, name=str(row[g_name_top]).strip() if g_name_top else "UNKNOWN",
-                                        policy_no=topup_policy_no_rule, policy_type="TOPUP", card_no=str(row[g_card_top]).strip() if g_card_top else "UNKNOWN",
-                                        relationship=str(row[g_relation_top]).strip() if g_relation_top else "SELF", age=parsed_age_top, valid_up_to=str(row[g_expiry_top]).strip() if g_expiry_top else "UNKNOWN"
-                                    ))
-                                
-                                pdf_bytes = pdf_file.getvalue()
-                                save_card_to_db(emp_id, pdf_bytes, st.session_state.username, family_members, topup_policy_no_rule, "TOPUP", topup_company_name)
-                                topup_count += 1
-                    st.success(f"✅ Ingested **{topup_count}** Top Up policy bundles securely.")
-                    gc.collect()
-        st.markdown("</div>", unsafe_allow_html=True)
+    with col_tm:
+        st.subheader("🟧 Top-Up Policy Module")
+        t_excel = st.file_uploader("Upload Topup List", type=["xlsx", "xls", "csv"], key="m_top_xl")
+        t_pdfs = st.file_uploader("Upload Topup Cards", type=["pdf"], accept_multiple_files=True, key="m_top_pdf")
+        if st.button("Ingest Topup", type="primary", use_container_width=True) and t_excel and t_pdfs:
+            df = clean_and_align_dataframe(pd.read_csv(t_excel) if t_excel.name.endswith('.csv') else pd.read_excel(t_excel))
+            cols = list(df.columns)
+            emp_c = guess_column(cols, ["EMP", "ID", "HAT", "CO"])
+            name_c = robust_guess_column(cols, ["NAME", "MEMBER", "INSURED"])
+            comp_c = robust_guess_column(cols, ["COMPANY", "CORPORATE", "CLIENT"])
+            pol_c = robust_guess_column(cols, ["POLICY", "POL"])
+            c_name = str(df.iloc[0][comp_c]).strip().upper() if comp_c else "TOPUP_CORP"
+            p_no = str(df.iloc[0][pol_c]).strip().upper() if pol_c else "UNKNOWN"
+            count = 0
+            for pfile in t_pdfs:
+                eid = os.path.splitext(pfile.name)[0].strip().upper()
+                m_rows = df[df[emp_c].astype(str).str.strip() == eid]
+                if not m_rows.empty:
+                    save_employee_to_directory(eid, str(m_rows.iloc[0][name_c]), "", p_no, c_name)
+                    save_card_to_db(eid, pfile.getvalue(), st.session_state.username, [], p_no, "TOPUP", c_name)
+                    count += 1
+            st.success(f"Ingested {count} Topup Cards.")
 
-# ==============================================================================
 # --- TAB 3: BULK RETRIEVAL ---
-# ==============================================================================
 with tab_bulk:
     st.markdown("### 📥 Bulk E-Card Retrieval")
-    bulk_policy_filter = st.text_input("Target Policy Number (Optional):", placeholder="e.g. GHI-91-25-0925594-000", key="bulk_policy_no")
-    bulk_input = st.text_area("List of Employee IDs (comma or space separated):", height=150)
-    
-    if st.button("📦 Fetch Cards & Build ZIP", type="primary", use_container_width=True):
-        if bulk_input.strip():
-            with st.spinner("Fetching cloud database filepaths..."):
-                clean_ids = list(set([i.strip().upper() for i in bulk_input.replace(',', ' ').split() if i.strip()]))
-                found_cards = get_bulk_cards_from_db(clean_ids, policy_no=bulk_policy_filter)
-                
-                if found_cards:
-                    bulk_zip_buffer = BytesIO()
-                    with zipfile.ZipFile(bulk_zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                        for card in found_cards:
-                            zf.writestr(f"{card['policy_no']}_{card['emp_id']}_{card['card_type']}_ECard.pdf", bytes(card['pdf_data']))
-                    st.session_state.bulk_zip_data = bulk_zip_buffer.getvalue()
-                    
-                    missing_ids = [i for i in clean_ids if i not in [c['emp_id'] for c in found_cards]]
-                    msg = f"✅ Successfully packaged **{len(found_cards)}** files."
-                    if missing_ids: msg += f"\n\n⚠️ **Missing:** {', '.join(missing_ids)}"
-                    st.info(msg)
-                else: st.error("❌ None of the requested IDs were found in DB.")
+    b_pol = st.text_input("Filter Policy (Optional):", placeholder="e.g. OG-27-1801-8403-00000112")
+    b_input = st.text_area("Employee IDs (comma/space separated):")
+    if st.button("📦 Fetch & Package ZIP", type="primary", use_container_width=True) and b_input.strip():
+        clean_ids = list(set([i.strip().upper() for i in b_input.replace(',', ' ').split() if i.strip()]))
+        found = get_bulk_cards_from_db(clean_ids, policy_no=b_pol)
+        if found:
+            zbuf = BytesIO()
+            with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for c in found: zf.writestr(f"{c['policy_no']}_{c['emp_id']}_{c['card_type']}.pdf", bytes(c['pdf_data']))
+            st.download_button("📥 Download Batch ZIP", data=zbuf.getvalue(), file_name="Bulk_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
+            st.success(f"Packaged {len(found)} cards.")
+        else: st.error("No matching cards found.")
 
-    if st.session_state.get('bulk_zip_data'):
-        st.download_button("📥 Download Batch ZIP", data=st.session_state.bulk_zip_data, file_name="Bulk_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
-
-# ==============================================================================
-# --- TAB 4: GLOBAL DIRECTORY ---
-# ==============================================================================
+# --- TAB 4: DIRECTORY ---
 with tab_directory:
     st.markdown("### 📊 Active Employee Directory")
-    all_members = get_members_from_db()
-    if all_members:
-        df_all = pd.DataFrame(all_members).drop(columns=['_id', 'id'], errors='ignore')
-        search_term = st.text_input("🔍 Search by Name, Emp Code, or Policy Number:")
-        if search_term:
-            df_all = df_all[df_all['name'].str.contains(search_term, case=False, na=False) | 
-                            df_all['emp_id'].str.contains(search_term, case=False, na=False) |
-                            df_all['policy_no'].str.contains(search_term, case=False, na=False)]
+    members = get_members_from_db()
+    if members:
+        df_all = pd.DataFrame(members).drop(columns=['_id', 'id'], errors='ignore')
+        st_term = st.text_input("🔍 Search Directory:")
+        if st_term: df_all = df_all[df_all['name'].str.contains(st_term, case=False, na=False) | df_all['emp_id'].str.contains(st_term, case=False, na=False)]
         st.dataframe(df_all, hide_index=True, use_container_width=True)
 
-# ==============================================================================
 # --- TAB 5: SEARCH INDIVIDUAL ---
-# ==============================================================================
 with tab_search:
-    col_search, col_btn = st.columns([3, 1])
-    search_id = col_search.text_input("Enter Employee ID (Hat / Co):", label_visibility="collapsed", placeholder="e.g. 101")
-    search_policy_no = st.text_input("Specific Client Policy (Optional):", placeholder="e.g. GHI-91-25-0925594-000", key="search_policy_filter")
-    
-    if col_btn.button("🔍 Search", use_container_width=True) and search_id:
-        cards = get_cards_from_db(search_id.strip().upper(), policy_no=search_policy_no)
-        members = get_members_from_db(search_id.strip().upper())
-        
+    col_s1, col_s2 = st.columns([3, 1])
+    s_id = col_s1.text_input("Enter Employee ID:", placeholder="e.g. 771461")
+    s_pol = st.text_input("Policy Number (Optional):")
+    if col_s2.button("🔍 Search", use_container_width=True) and s_id:
+        cards = get_cards_from_db(s_id, policy_no=s_pol)
+        members = get_members_from_db(s_id)
         if cards:
-            st.success(f"✅ Found **{len(cards)}** associated policy bundle(s) in Database/Cloud.")
-            if members:
-                display_members = pd.DataFrame(members).drop(columns=['_id', 'id', 'emp_id'], errors='ignore')
-                if search_policy_no:
-                    display_members = display_members[display_members["policy_no"].str.upper() == search_policy_no.strip().upper()]
-                st.dataframe(display_members, hide_index=True, use_container_width=True)
-            
-            for card in cards:
-                c_type = card["card_type"]
-                p_no = card["policy_no"]
-                pdf_bytes = bytes(card['pdf_data'])
-                st.download_button(label=f"📥 Download {c_type} Card ({p_no})", data=pdf_bytes, file_name=f"CapitupIndia_{search_id.upper()}_{p_no}_{c_type}.pdf", mime="application/pdf")
-                preview_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                for page_num in range(len(preview_doc)):
-                    st.image(preview_doc[page_num].get_pixmap(dpi=150).tobytes("png"), use_container_width=True) 
-                preview_doc.close()
-        else: st.error("No E-Card found.")
+            st.success(f"Found {len(cards)} card(s).")
+            if members: st.dataframe(pd.DataFrame(members).drop(columns=['_id', 'id', 'emp_id'], errors='ignore'), hide_index=True, use_container_width=True)
+            for c in cards:
+                pdf_b = bytes(c["pdf_data"])
+                st.download_button(f"📥 Download {c['card_type']} ({c['policy_no']})", data=pdf_b, file_name=f"{s_id}_{c['card_type']}.pdf", mime="application/pdf")
+                pdoc = fitz.open(stream=pdf_b, filetype="pdf")
+                for pnum in range(len(pdoc)): st.image(pdoc[pnum].get_pixmap(dpi=150).tobytes("png"), use_container_width=True)
+                pdoc.close()
+        else: st.error("No card found.")
 
-# ==============================================================================
-# --- TAB 6: EMAIL DISTRIBUTION AGENT (WITH LOGS & 1-CLICK RETRY) ---
-# ==============================================================================
+# --- TAB 6: EMAIL DISTRIBUTION (WELCOME KIT & OVERRIDES) ---
 with tab_email:
-    st.markdown("### ✉️ Email Dispatch Center")
-    st.markdown("Configure corporate assets, manage correction form response windows, dispatch welcome emails, and audit delivery history.")
+    st.markdown("### ✉️ Welcome Kit & E-Card Distribution Center")
     
-    policies_registered = db.ecards.distinct("policy_no")
-    if not policies_registered: policies_registered = ["No Clients Ingested"]
-        
-    col_p_select, col_empty = st.columns([1, 2])
-    selected_client_policy = col_p_select.selectbox("Select Active Client Campaign", policies_registered, key="t6_client_policy")
+    live_tenants_map = get_live_tenants_and_policies()
+    discovered_comp_list = sorted(list(live_tenants_map.keys()))
+    
+    col_camp1, col_camp2 = st.columns(2)
+    with col_camp1:
+        camp_comp_opts = ["🔍 Auto-Detect / All"] + discovered_comp_list + ["➕ Custom Company Name"]
+        sel_camp_comp = st.selectbox("Select Client Company (Live Cloud Scanned):", camp_comp_opts, key="t6_camp_comp")
+        if sel_camp_comp == "➕ Custom Company Name":
+            t6_custom_company = st.text_input("Enter Company Name Override:", placeholder="e.g. STRATEGIC SYSTEMS IT SOLUTIONS", key="t6_comp_override_manual")
+        else:
+            t6_custom_company = st.text_input("Company Name Override (Optional):", value=sel_camp_comp if sel_camp_comp != "🔍 Auto-Detect / All" else "", key="t6_comp_override")
 
+    with col_camp2:
+        avail_camp_pols = live_tenants_map.get(sel_camp_comp, []) if sel_camp_comp in live_tenants_map else []
+        all_db_pols = db.ecards.distinct("policy_no")
+        combined_pols = sorted(list(set(avail_camp_pols + all_db_pols)))
+        camp_pol_opts = ["🔍 All Policies"] + combined_pols + ["➕ Custom Policy Number"]
+        sel_camp_pol = st.selectbox("Select Target Policy Campaign:", camp_pol_opts, key="t6_camp_pol")
+        if sel_camp_pol == "➕ Custom Policy Number":
+            t6_custom_policy = st.text_input("Enter Policy Number Override:", placeholder="e.g. OG-27-1801-8403-00000112", key="t6_pol_override_manual")
+        else:
+            t6_custom_policy = st.text_input("Policy Number Override (Optional):", value=sel_camp_pol if sel_camp_pol != "🔍 All Policies" else "", key="t6_pol_override")
+
+    active_scope_policy = t6_custom_policy.strip().upper() if t6_custom_policy else (sel_camp_pol if sel_camp_pol not in ["🔍 All Policies", "➕ Custom Policy Number"] else None)
+    active_display_company = t6_custom_company.strip().upper() if t6_custom_company else (sel_camp_comp if sel_camp_comp != "🔍 Auto-Detect / All" else "Corporate Group Mediclaim")
+    
     st.divider()
-    col_left_layout, col_right_layout = st.columns([1.2, 1])
-
-    with col_left_layout:
-        # --- SECTION 1: INSURER ASSET VAULT ---
-        st.subheader("⚙️ Insurer Asset Vault (Cloud-Native)")
-        col_vault1, col_vault2, col_vault3 = st.columns(3) 
-        
-        with col_vault1:
-            st.markdown("<div style='border: 1px solid #ddd; padding: 10px; border-radius: 6px; text-align: center; background-color: #fafafa;'>", unsafe_allow_html=True)
-            st.markdown("📄 **Claim Form**")
+    col_l1, col_l2 = st.columns([1.2, 1])
+    
+    with col_l1:
+        st.subheader("⚙️ Asset Vault & Google Form Controller")
+        c_v1, c_v2, c_v3 = st.columns(3)
+        with c_v1:
             if get_asset("claim_form"):
-                st.success("Active")
-                if st.button("Delete Form", key="del_form"):
-                    delete_asset("claim_form"); st.rerun()
+                st.success("Claim Form Active"); 
+                if st.button("Delete Form", key="d_cf"): delete_asset("claim_form"); st.rerun()
             else:
-                st.warning("Missing")
-                uploaded_claim_doc = st.file_uploader("Upload Claim Form", type=["pdf"], label_visibility="collapsed", key="v_claim")
-                if uploaded_claim_doc:
-                    save_asset("claim_form", uploaded_claim_doc.getvalue()); st.success("Saved!"); st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        with col_vault2:
-            st.markdown("<div style='border: 1px solid #ddd; padding: 10px; border-radius: 6px; text-align: center; background-color: #fafafa;'>", unsafe_allow_html=True)
-            st.markdown("🖼️ **Welcome Poster**")
+                up_cf = st.file_uploader("Upload Claim Form", type=["pdf"], key="up_cf")
+                if up_cf: save_asset("claim_form", up_cf.getvalue()); st.rerun()
+        with c_v2:
             if get_asset("poster"):
-                st.success("Active")
-                if st.button("Delete Poster", key="del_poster"):
-                    delete_asset("poster"); st.rerun()
+                st.success("Poster Active"); 
+                if st.button("Delete Poster", key="d_pos"): delete_asset("poster"); st.rerun()
             else:
-                st.warning("Missing")
-                uploaded_poster_doc = st.file_uploader("Upload Poster", type=["png", "jpg", "jpeg"], label_visibility="collapsed", key="v_poster")
-                if uploaded_poster_doc:
-                    save_asset("poster", uploaded_poster_doc.getvalue()); st.success("Saved!"); st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        with col_vault3:
-            st.markdown("<div style='border: 1px solid #ddd; padding: 10px; border-radius: 6px; text-align: center; background-color: #fafafa;'>", unsafe_allow_html=True)
-            st.markdown("🛡️ **Corporate Logo**")
+                up_pos = st.file_uploader("Upload Poster", type=["png", "jpg"], key="up_pos")
+                if up_pos: save_asset("poster", up_pos.getvalue()); st.rerun()
+        with c_v3:
             if get_asset("logo"):
-                st.success("Active")
-                if st.button("Delete Logo", key="del_logo"):
-                    delete_asset("logo"); st.rerun()
+                st.success("Logo Active"); 
+                if st.button("Delete Logo", key="d_logo"): delete_asset("logo"); st.rerun()
             else:
-                st.warning("Missing")
-                uploaded_logo_doc = st.file_uploader("Upload Logo", type=["png", "jpg", "jpeg"], label_visibility="collapsed", key="v_logo")
-                if uploaded_logo_doc:
-                    save_asset("logo", uploaded_logo_doc.getvalue()); st.success("Saved!"); st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
+                up_log = st.file_uploader("Upload Logo", type=["png", "jpg"], key="up_log")
+                if up_log: save_asset("logo", up_log.getvalue()); st.rerun()
 
-        st.divider()
-
-        # --- SECTION 2: PROMINENT GOOGLE CORRECTION FORM CONTROLLER ---
-        st.subheader("📝 E-Card Correction Window Controller")
-        st.caption("Control live response acceptance for the correction Google Form and set auto-closing deadlines.")
-
-        gas_setting = db.settings.find_one({"key": "gas_url"})
-        stored_gas_url = gas_setting["value"] if gas_setting else DEFAULT_GAS_URL
-        
-        with st.expander("⚙️ Google Apps Script Endpoint URL Configuration", expanded=False):
-            gas_url_input = st.text_input("Google Apps Script Web App URL:", value=stored_gas_url, key="t6_gas_url_field")
-            if gas_url_input != stored_gas_url:
-                db.settings.update_one({"key": "gas_url"}, {"$set": {"key": "gas_url", "value": gas_url_input.strip()}}, upsert=True)
-                st.success("Google Apps Script URL saved!")
-                time.sleep(0.5)
-                st.rerun()
-
-        current_form_status = get_form_status(stored_gas_url) if stored_gas_url else "DISCONNECTED"
-        active_deadline_text = get_deadline_from_db(selected_client_policy)
-        
-        if current_form_status == "CLOSED" and active_deadline_text not in ["Form Closed", "Expired / Closed", "Not Set"]:
-            save_deadline_to_db(selected_client_policy, "Expired / Closed")
-            active_deadline_text = "Expired / Closed"
-
-        st.markdown("<div style='background-color: #f8f9fa; border: 1px solid #ced4da; padding: 15px; border-radius: 8px; margin-bottom: 15px;'>", unsafe_allow_html=True)
-        col_stat1, col_stat2 = st.columns(2)
-        with col_stat1:
-            if current_form_status == "OPEN": st.markdown("Live Form Status: **🟢 OPEN (Accepting Responses)**")
-            elif current_form_status == "CLOSED": st.markdown("Live Form Status: **🔴 CLOSED (Submissions Shut)**")
-            else: st.markdown(f"Live Form Status: **⚠️ {current_form_status}**")
-        with col_stat2:
-            st.markdown(f"⏱️ Active Window Closes: **{active_deadline_text}**")
-            
         st.markdown("---")
-        
-        col_dur, col_btns = st.columns([1.2, 1.8])
-        with col_dur:
-            deadline_option = st.selectbox(
-                "Set Response Window:",
-                ["1 Day (24 hrs)", "3 Days (72 hrs)", "1 Week (7 Days)", "10 Days", "2 Weeks (14 Days)", "Manual Open (No Timer)"],
-                key="t6_deadline_select"
-            )
-        with col_btns:
-            st.text("") 
-            c_btn_open, c_btn_close = st.columns(2)
+        gas_url = db.settings.find_one({"key": "gas_url"})["value"] if db.settings.find_one({"key": "gas_url"}) else DEFAULT_GAS_URL
+        f_stat = get_form_status(gas_url)
+        dline = get_deadline_from_db(active_scope_policy or "DEFAULT")
+        st.markdown(f"Live Form Status: **{'🟢 OPEN' if f_stat=='OPEN' else '🔴 CLOSED'}** | Active Closes: **{dline}**")
+        d_opt = st.selectbox("Set Response Window:", ["1 Day (24 hrs)", "3 Days (72 hrs)", "1 Week (7 Days)", "Manual Open"], key="t6_d_opt")
+        c_o1, c_o2 = st.columns(2)
+        if c_o1.button("🟢 Open Form", use_container_width=True, type="primary"):
+            res = schedule_form_close(gas_url, 24.0 if "1 Day" in d_opt else 72.0)
+            formatted_dl = (datetime.utcnow() + timedelta(hours=5, minutes=30, days=1 if "1 Day" in d_opt else 3)).strftime("%d-%b-%Y at %I:%M %p (IST)")
+            save_deadline_to_db(active_scope_policy or "DEFAULT", formatted_dl)
+            st.success("Form Opened!"); time.sleep(1); st.rerun()
+        if c_o2.button("🔴 Close Form", use_container_width=True):
+            set_form_status(gas_url, "close")
+            save_deadline_to_db(active_scope_policy or "DEFAULT", "Form Closed"); st.warning("Form Closed!"); time.sleep(1); st.rerun()
             
-            with c_btn_open:
-                if st.button("🟢 Open Form", use_container_width=True, type="primary", key="btn_open_gform"):
-                    if not stored_gas_url:
-                        st.error("Please configure the Google Apps Script Web App URL above.")
-                    elif deadline_option == "Manual Open (No Timer)":
-                        res = set_form_status(stored_gas_url, "open")
-                        if res:
-                            save_deadline_to_db(selected_client_policy, "Manual Close Required")
-                            st.success("Google Form is now OPEN (Manual close required).")
-                            time.sleep(1); st.rerun()
-                    else:
-                        duration_mapping = {"1 Day (24 hrs)": 24.0, "3 Days (72 hrs)": 72.0, "1 Week (7 Days)": 168.0, "10 Days": 240.0, "2 Weeks (14 Days)": 336.0}
-                        target_hours = duration_mapping[deadline_option]
-                        with st.spinner("Communicating with Google Apps Script..."):
-                            response_text = schedule_form_close(stored_gas_url, target_hours)
-                            if response_text and "SCHEDULED_FOR_" in response_text:
-                                iso_str = response_text.replace("SCHEDULED_FOR_", "")
-                                utc_datetime = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-                                local_datetime = utc_datetime + timedelta(hours=5, minutes=30)
-                                formatted_deadline_str = local_datetime.strftime("%B %d, %Y at %I:%M %p (IST)")
-                                save_deadline_to_db(selected_client_policy, formatted_deadline_str)
-                                st.success(f"Form OPENED and scheduled to close on: {formatted_deadline_str}")
-                                time.sleep(1.5); st.rerun()
-                            else: st.error(f"Failed to communicate with Google Form API: {response_text}")
-                                
-            with c_btn_close:
-                if st.button("🔴 Close Form", use_container_width=True, key="btn_close_gform"):
-                    if not stored_gas_url: st.error("Please configure the Google Apps Script Web App URL above.")
-                    else:
-                        with st.spinner("Closing Google Form..."):
-                            res = set_form_status(stored_gas_url, "close")
-                            if res:
-                                save_deadline_to_db(selected_client_policy, "Form Closed")
-                                st.warning("Google Form is now CLOSED to responses!")
-                                time.sleep(1.5); st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        st.divider()
-
-        # --- SECTION 3: EMAIL ARCHITECT & TEMPLATE ---
-        st.subheader("✉️ Email Architect")
-        subject_line_input = st.text_input("SUBJECT LINE", value="Your Health Insurance E-Card & Welcome Kit")
+        subj_in = st.text_input("SUBJECT LINE", value="Your Health Insurance E-Card & Welcome Kit", key="t6_subj")
         
-        logo_tag_component = ""
-        if get_asset("logo"):
-            logo_tag_component = """
-            <div style="text-align: center; margin-bottom: 15px;">
-              <img src="cid:logo_image" alt="CapitUp India Logo" style="height: 60px; width: auto; display: inline-block;" />
-            </div>
-            """
+        logo_tag_component = """<div style="text-align: center; margin-bottom: 15px;"><img src="cid:logo_image" alt="CapitUp India Logo" style="height: 60px; width: auto; display: inline-block;" /></div>""" if get_asset("logo") else ""
         
         brand_html_template = f"""<div style="font-family: 'Segoe UI', Arial, sans-serif; color: #333; line-height: 1.6; max-width: 650px; margin: 0 auto; border: 1px solid #C29B38; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.05); background-color: #ffffff;">
-  <!-- CapitUp India Official Branded Header -->
-  <div style="background-color: #0B1E30; padding: 28px 24px; text-align: center; border-bottom: 3px solid #C29B38; position: relative;">
+  <div style="background-color: #0B1E30; padding: 28px 24px; text-align: center; border-bottom: 3px solid #C29B38;">
     {logo_tag_component}
     <h2 style="color: #ffffff; margin: 0; font-size: 22px; letter-spacing: 1px; font-weight: 800; text-transform: uppercase;">CAPITUP INDIA</h2>
     <p style="color: #C29B38; margin: 5px 0 0 0; font-size: 11px; font-weight: bold; letter-spacing: 2px;">YOUR SECURE EMPLOYEE BENEFITS PARTNER</p>
   </div>
-  
-  <!-- Email Content Area -->
   <div style="padding: 32px 24px;">
     <p style="font-size: 15px; margin-top: 0;">Dear <strong>{{{{name}}}}</strong>,</p>
-    <p style="font-size: 14px; font-style: italic; color: #555;">Greetings..!</p>
     <p style="font-size: 14px;">We are pleased to welcome you to the <strong>CapitUp India</strong> ecosystem. Your Group Health Insurance policy with <strong>Bajaj Allianz General Insurance Company</strong> is active for the period <strong>26-May-2026 to 25-May-2027</strong>.</p>
-    <p style="font-size: 14px;">Please find attached your Health Cards / E-Cards and the policy coverage details for your reference.</p>
-    <p style="font-size: 14px; font-weight: 500; color: #0B1E30;">The login credentials for accessing the Bajaj Allianz portal will be shared shortly.</p>
-    
+    <p style="font-size: 14px;">Please find attached your Health Cards / E-Cards and policy coverage details for your reference.</p>
     <div style="background-color: #F4F6F8; border-left: 4px solid #C29B38; padding: 14px; margin: 20px 0; border-radius: 4px;">
       <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-        <tr>
-          <td style="width: 40%; font-weight: bold; color: #0B1E30; padding: 3px 0;">Employee ID:</td>
-          <td style="color: #333; padding: 3px 0;">{{{{emp_id}}}}</td>
-        </tr>
-        <tr>
-          <td style="font-weight: bold; color: #0B1E30; padding: 3px 0;">Policy Number:</td>
-          <td style="color: #333; padding: 3px 0;">{{{{policy_no}}}}</td>
-        </tr>
+        <tr><td style="width: 40%; font-weight: bold; color: #0B1E30; padding: 3px 0;">Employee ID:</td><td style="color: #333;">{{{{emp_id}}}}</td></tr>
+        <tr><td style="font-weight: bold; color: #0B1E30; padding: 3px 0;">Company:</td><td style="color: #333;">{{{{company_name}}}}</td></tr>
+        <tr><td style="font-weight: bold; color: #0B1E30; padding: 3px 0;">Policy Number:</td><td style="color: #333;">{{{{policy_no}}}}</td></tr>
       </table>
     </div>
-
-    <!-- Cashless Hospitalization Process Section -->
-    <div style="border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; margin: 24px 0; background-color: #ffffff;">
-      <h3 style="margin-top: 0; color: #0B1E30; font-size: 15px; border-bottom: 2px solid #23C2A9; padding-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">🏥 Cashless Hospitalization Process</h3>
-      <p style="font-size: 13px; margin: 8px 0;">In case of planned or emergency hospitalization, kindly follow the steps below:</p>
-      <ol style="font-size: 13px; padding-left: 20px; margin: 10px 0; color: #555;">
-        <li style="margin-bottom: 8px;">Identify a network hospital from the official locator list available here: <br/>
-          <a href="https://www.bajajallianz.com/branch-locator.html" target="_blank" style="color: #23C2A9; font-weight: bold; text-decoration: none;">Bajaj Allianz Hospital Locator</a>
-        </li>
-        <li style="margin-bottom: 8px;">At the hospital insurance desk, please provide the following verifications:
-          <ul style="padding-left: 15px; margin-top: 4px; list-style-type: circle;">
-            <li>Health Card / E-Card</li>
-            <li>Aadhaar Card</li>
-            <li>Employee ID Card</li>
-          </ul>
-        </li>
-        <li>The hospital desk will coordinate directly with Bajaj Allianz to initiate the cashless authorization process.</li>
-      </ol>
-    </div>
-
-    <!-- Reimbursement Claim Documents Section -->
-    <div style="border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; margin: 24px 0; background-color: #ffffff;">
-      <h3 style="margin-top: 0; color: #0B1E30; font-size: 15px; border-bottom: 2px solid #C29B38; padding-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">📋 Reimbursement Claim Documents</h3>
-      <p style="font-size: 13px; margin: 8px 0;">In case of reimbursement claims, kindly upload the documents through the Bajaj Allianz portal or share a single compiled PDF file (under 10 MB) with our team at <a href="mailto:syamala.g@capitupindia.com" style="color: #23C2A9; font-weight: bold; text-decoration: none;">syamala.g@capitupindia.com</a> or <a href="mailto:claims@capitupindia.com" style="color: #23C2A9; font-weight: bold; text-decoration: none;">claims@capitupindia.com</a>.</p>
-      <p style="font-size: 13px; font-weight: bold; margin-bottom: 6px; color: #0B1E30;">Please ensure that the following documents are submitted:</p>
-      <ul style="font-size: 12px; padding-left: 20px; margin: 0; color: #555; line-height: 1.5;">
-        <li style="margin-bottom: 4px;"><strong>Claim Form Part-A (attached):</strong> Checklist duly filled and signed by the employee.</li>
-        <li style="margin-bottom: 4px;"><strong>Claim Form Part-B (attached):</strong> Duly completed with hospital stamp and authorized signature.</li>
-        <li style="margin-bottom: 4px;">Original detailed discharge summary with hospital stamp and signature (including date and time).</li>
-        <li style="margin-bottom: 4px;">Original final bill with hospital stamp and signature (including date and time).</li>
-        <li style="margin-bottom: 4px;">Original payment receipts corresponding to the final bill.</li>
-        <li style="margin-bottom: 4px;">Original pharmacy bills with stamp and signature.</li>
-        <li style="margin-bottom: 4px;">Original diagnostic/laboratory reports and X-Ray/Scan reports with payment receipts, if applicable.</li>
-        <li style="margin-bottom: 4px;">Original prescription of the first consultation and previous consultation records, if any.</li>
-        <li style="margin-bottom: 4px;">Copy of Patient Health ID Card & Aadhaar Card.</li>
-        <li style="margin-bottom: 4px;">Copy of Employee PAN Card & Employee ID Card.</li>
-        <li style="margin-bottom: 4px;">Copy of Employee's cancelled cheque leaf (with printed Name, Account Number and IFSC) or the first page of the bank passbook.</li>
-        <li style="margin-bottom: 4px;">Employee contact details (mobile number, email ID, and address).</li>
-      </ul>
-    </div>
-
-    <!-- Call to Actions & dynamic Correction Google Form Pre-fill Link -->
-    <div style="text-align: center; margin: 32px 0 16px 0;">
-      <a href="https://docs.google.com/forms/d/e/1FAIpQLSfMZ0SHY4pr9NVfZwHQRhU6Jmy-vN2K8INePRdkYQarVA_EMw/viewform?usp=pp_url&entry.877007954={{{{name}}}}&entry.863990631={{{{emp_id}}}}&entry.1115400795={{{{policy_no}}}}" 
-         style="background-color: #23C2A9; color: #ffffff; padding: 14px 28px; text-decoration: none; font-size: 13px; font-weight: bold; border-radius: 6px; display: inline-block; box-shadow: 0 4px 10px rgba(35, 194, 169, 0.25); border: 1px solid #1fa895; transition: background-color 0.2s;">
-        📝 Request E-Card Correction
-      </a>
-      <p style="color: #888; font-size: 10px; margin-top: 10px;">If you detect any spelling or coverage discrepancies, click the button above to request corrections.</p>
-      <p style="color: #C29B38; font-size: 11px; font-weight: bold; margin-top: 6px;">⏱️ Correction Form Window Closes On: {{{{deadline}}}}</p>
+    <div style="text-align: center; margin: 30px 0;">
+      <p style="color: #C29B38; font-size: 11px; font-weight: bold;">⏱️ Correction Form Window Closes On: {{{{deadline}}}}</p>
     </div>
   </div>
   <!-- FOOTER -->
   <div style="background-color: #F4F6F8; padding: 24px; text-align: center; border-top: 1px solid #e5e7eb;">
     <p style="margin: 0; font-size: 12px; color: #0B1E30; font-weight: bold;">Thank you for being part of the CapitUp Family</p>
-    <p style="margin: 4px 0 0 0; font-size: 10px; color: #888;">CapitUp India Pvt. Ltd. | 4th Floor, HUDA Techno Enclave, HITEC City, Hyderabad-500081</p>
-    <div style="margin-top: 15px; font-size: 9px; color: #C29B38; font-weight: bold; letter-spacing: 1px;">
-      ⚡ SECURED BY CAPITUP INDIA WATERMARK SYSTEM
-    </div>
+    <p style="margin: 4px 0 0 0; font-size: 10px; color: #888;">CapitUp India Pvt. Ltd. | HITEC City, Hyderabad</p>
   </div>
 </div>"""
+        html_in = st.text_area("HTML BODY TEMPLATE", value=brand_html_template, height=200, key="t6_html_tmpl")
         
-        html_body_input = st.text_area("HTML BODY TEMPLATE (VARIABLES: {{name}}, {{emp_id}}, {{policy_no}}, {{deadline}})", value=brand_html_template, height=250)
-        
-        if st.checkbox("👁️ Toggle Live Preview", key="live_prev"):
-            st.markdown("#### Live Preview Frame")
-            preview_rendered = html_body_input.replace("{{name}}", st.session_state.username).replace("{{emp_id}}", "MOCK-101").replace("{{policy_no}}", selected_client_policy).replace("{{deadline}}", active_deadline_text)
-            logo_asset = get_asset("logo")
-            if logo_asset: st.image(logo_asset, caption="Vault Logo Asset Preview", use_container_width=True) 
-            st.components.v1.html(preview_rendered, height=500, scrolling=True)
+        if st.checkbox("👁️ Live Preview", key="prev_t6"):
+            rendered_t6 = html_in.replace("{{name}}", st.session_state.username).replace("{{emp_id}}", "MOCK-101").replace("{{company_name}}", active_display_company).replace("{{policy_no}}", active_scope_policy or "OG-27-1801-8403-00000112").replace("{{deadline}}", dline)
+            st.components.v1.html(rendered_t6, height=450, scrolling=True)
 
-    with col_right_layout:
-        st.subheader("👥 Pending Enrollment")
-        st.markdown("Active users missing a welcome email.")
-
-        # --- SECTION 4: RESILIENT DIRECTORY MAPPING UPLOADER ---
-        st.markdown("<div style='background-color:#f0f2f6; padding:15px; border-radius:6px; border:1px solid #ddd;'>", unsafe_allow_html=True)
-        t6_mapping_file = st.file_uploader("📥 Upload Client Mapping Directory (CSV/Excel)", type=["csv", "xlsx", "xls"], key="t6_mapping_uploader")
-        
-        if t6_mapping_file:
-            try:
-                if t6_mapping_file.name.endswith('.csv'): raw_df_map = pd.read_csv(t6_mapping_file)
-                else: raw_df_map = pd.read_excel(t6_mapping_file)
-                
-                with st.expander("🛠️ Advanced Sheet Options (If headers are on a specific row)", expanded=False):
-                    header_row_choice = st.number_input("Header Row Index:", min_value=0, max_value=min(15, len(raw_df_map)-1), value=0, step=1, key="t6_custom_header_idx")
-                    use_manual_header = st.checkbox("Apply custom header row", value=False, key="t6_apply_custom_hdr")
-                
-                if use_manual_header: df_map = clean_and_align_dataframe(raw_df_map.copy(), forced_header_row=header_row_choice)
-                else: df_map = clean_and_align_dataframe(raw_df_map.copy())
-                    
-                df_map_cols = list(df_map.columns)
-                
-                st.markdown("##### ⚙️ Map Directory Columns")
-                g_emp = robust_guess_column(df_map_cols, ["EMP ID", "EMPLOYEE ID", "EMP", "ID", "HAT", "CO", "CODE"]) or df_map_cols[0]
-                g_name = robust_guess_column(df_map_cols, ["MEMBER NAME", "NAME", "EMPLOYEE NAME", "INSURED"]) or (df_map_cols[1] if len(df_map_cols) > 1 else df_map_cols[0])
-                g_email = robust_guess_column(df_map_cols, ["EMAIL", "EMAIL ADDRESS", "E CARDS ACCESS CODE", "ACCESS", "MAIL"]) or (df_map_cols[2] if len(df_map_cols) > 2 else df_map_cols[0])
-                g_rel = robust_guess_column(df_map_cols, ["RELATION", "RELATIONSHIP", "RELATI", "REL"])
-                
-                idx_emp = df_map_cols.index(g_emp) if g_emp in df_map_cols else 0
-                idx_name = df_map_cols.index(g_name) if g_name in df_map_cols else min(1, len(df_map_cols)-1)
-                idx_email = df_map_cols.index(g_email) if g_email in df_map_cols else min(2, len(df_map_cols)-1)
-                
-                c_m1, c_m2 = st.columns(2)
-                with c_m1:
-                    emp_col_map = st.selectbox("Employee ID Column*", df_map_cols, index=idx_emp, key="t6_sel_emp")
-                    email_col_map = st.selectbox("Email Address Column*", df_map_cols, index=idx_email, key="t6_sel_email")
-                with c_m2:
-                    name_col_map = st.selectbox("Full Name Column*", df_map_cols, index=idx_name, key="t6_sel_name")
-                    rel_options = ["None (All Rows are Primary Employees)"] + df_map_cols
-                    idx_rel = rel_options.index(g_rel) if (g_rel and g_rel in rel_options) else 0
-                    rel_col_map = st.selectbox("Relationship Column (Optional)", rel_options, index=idx_rel, key="t6_sel_rel")
-                
-                if st.button("🚀 Sync Directory to Campaign", type="primary", use_container_width=True, key="btn_sync_t6"):
-                    with st.spinner("Syncing employee directory..."):
-                        added_records = 0
-                        parsed_employees = {}
-                        has_rel = rel_col_map != "None (All Rows are Primary Employees)"
-                        
-                        for _, row in df_map.iterrows():
-                            raw_emp_id = str(row[emp_col_map]).strip().upper()
-                            if raw_emp_id.endswith('.0'): raw_emp_id = raw_emp_id[:-2]
-                            raw_name = str(row[name_col_map]).strip()
-                            
-                            # Clean string conversion to avoid 'nan'
-                            raw_email = str(row[email_col_map]).strip().lower()
-                            if raw_email in ["nan", "none", "null", "undefined", ""]: raw_email = ""
-                            
-                            raw_rel = str(row[rel_col_map]).strip().upper() if has_rel else "SELF"
-                            
-                            if not raw_emp_id or raw_emp_id in ["NAN", "NONE", ""]: continue
-                            
-                            if raw_emp_id not in parsed_employees or raw_rel in ["SELF", "PRIMARY", "EMPLOYEE", "PROPOSER"]:
-                                parsed_employees[raw_emp_id] = {"name": raw_name, "email": raw_email}
-                        
-                        for emp_id_key, detail in parsed_employees.items():
-                            save_employee_to_directory(emp_id_key, detail["name"], detail["email"], selected_client_policy)
-                            added_records += 1
-                        
-                        st.success(f"✅ Successfully synced **{added_records}** employees to campaign **{selected_client_policy}**!")
-                        time.sleep(1.5)
-                        st.rerun()
-                        
-            except Exception as e:
-                st.error(f"Error parsing mapping sheet: {e}")
-                
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        st.divider()
-        
-        # --- SECTION 5: SMART QUEUE DISPATCHER ---
-        pending_ecards = list(db.ecards.find({"policy_no": selected_client_policy, "email_sent": {"$ne": True}}))
-        
-        ready_to_send_jobs = []
-        missing_email_jobs = []
-        all_display_list = []
-        
-        for ecard in pending_ecards:
-            directory_record = db.directory.find_one({"emp_id": ecard["emp_id"], "policy_no": selected_client_policy})
-            emp_name = directory_record.get("name", "UNKNOWN (Missing Directory Metadata)") if directory_record else "UNKNOWN (Missing Directory Metadata)"
-            emp_email = directory_record.get("email", "") if directory_record else ""
-            if emp_email in ["nan", "none", "null", "undefined"]: emp_email = ""
+    with col_l2:
+        st.subheader("👥 Directory Sync & Mail Queue")
+        up_map = st.file_uploader("Upload Client Mapping Sheet (CSV/Excel)", type=["csv", "xlsx"], key="t6_map_up")
+        if up_map:
+            df_m = clean_and_align_dataframe(pd.read_csv(up_map) if up_map.name.endswith('.csv') else pd.read_excel(up_map))
+            cols_m = list(df_m.columns)
+            c_e1, c_e2 = st.columns(2)
+            e_col = c_e1.selectbox("Emp ID Column", cols_m)
+            em_col = c_e1.selectbox("Email Column", cols_m)
+            n_col = c_e2.selectbox("Name Column", cols_m)
+            rel_col = c_e2.selectbox("Relation Column (Optional)", ["None (All Primary)"] + cols_m)
             
-            job_item = {
-                "EMP ID": ecard["emp_id"],
-                "Name": emp_name,
-                "Email": emp_email if emp_email else "⚠️ Missing Email (nan)",
-                "Card Type": ecard["card_type"],
-                "_clean_email": emp_email
-            }
-            all_display_list.append(job_item)
+            if st.button("🚀 Sync Directory to Campaign", type="primary", use_container_width=True):
+                synced_c = 0
+                has_rel = rel_col != "None (All Primary)"
+                for _, r in df_m.iterrows():
+                    em_val = str(r[em_col]).strip().lower()
+                    if em_val in ["nan", "none", "null", "undefined"]: em_val = ""
+                    rel_val = str(r[rel_col]).strip().upper() if has_rel else "SELF"
+                    if rel_val in ["SELF", "PRIMARY", "EMPLOYEE", "PROPOSER"]:
+                        save_employee_to_directory(str(r[e_col]).strip().upper(), str(r[n_col]).strip(), em_val, active_scope_policy or "DEFAULT", active_display_company)
+                        synced_c += 1
+                st.success(f"Synced {synced_c} primary employees!"); time.sleep(1); st.rerun()
+
+        # Build Queue
+        q_filter = {"email_sent": {"$ne": True}}
+        if active_scope_policy: q_filter["policy_no"] = active_scope_policy
             
-            if emp_email and "@" in emp_email:
-                ready_to_send_jobs.append(job_item)
-            else:
-                missing_email_jobs.append(job_item)
+        pending_cards = list(db.ecards.find(q_filter))
+        ready_jobs = []
+        missing_jobs = []
+        
+        for e in pending_cards:
+            drec = db.directory.find_one({"emp_id": e["emp_id"]})
+            em = drec.get("email", "") if drec else ""
+            ename = drec.get("name", "Employee") if drec else "Employee"
+            if em in ["nan", "none", "null", "undefined"]: em = ""
+            
+            item = {"EMP ID": e["emp_id"], "Name": ename, "Email": em if em else "⚠️ Missing Email (nan)", "Policy": e["policy_no"]}
+            if em and "@" in em: ready_jobs.append(item)
+            else: missing_jobs.append(item)
 
-        m_q1, m_q2 = st.columns(2)
-        m_q1.metric("🟢 Ready to Dispatch", len(ready_to_send_jobs))
-        m_q2.metric("⚠️ Missing Email / Incomplete", len(missing_email_jobs))
+        m_c1, m_c2 = st.columns(2)
+        m_c1.metric("🟢 Ready to Dispatch", len(ready_jobs))
+        m_c2.metric("⚠️ Missing Email (Skipped)", len(missing_jobs))
 
-        if all_display_list:
-            df_display = pd.DataFrame(all_display_list).drop(columns=["_clean_email"])
-            st.dataframe(df_display, hide_index=True, use_container_width=True)
+        if ready_jobs or missing_jobs:
+            st.dataframe(pd.DataFrame(ready_jobs + missing_jobs), hide_index=True, use_container_width=True)
+
+        st.markdown("---")
+        b_lim = st.number_input("Batch Limit", min_value=1, max_value=500, value=min(20, max(1, len(ready_jobs))), key="t6_batch_lim")
+        
+        c_proc, c_clear = st.columns([1.5, 1])
+        with c_proc:
+            if st.button(f"▶️ Process {min(len(ready_jobs), b_lim)} Ready Jobs", type="primary", use_container_width=True, disabled=(len(ready_jobs)==0)):
+                sent = 0
+                for j in ready_jobs[:b_lim]:
+                    cards = get_cards_from_db(j["EMP ID"], policy_no=j["Policy"])
+                    if cards:
+                        body = html_in.replace("{{name}}", j["Name"]).replace("{{emp_id}}", j["EMP ID"]).replace("{{company_name}}", active_display_company).replace("{{policy_no}}", j["Policy"]).replace("{{deadline}}", dline)
+                        ok, err = send_multi_ecard_email(j["Email"], subj_in, body, cards)
+                        if ok:
+                            db.ecards.update_many({"emp_id": j["EMP ID"], "policy_no": j["Policy"]}, {"$set": {"email_sent": True}})
+                            log_email_dispatch(j["EMP ID"], j["Name"], j["Email"], j["Policy"], "DELIVERED", campaign_type="WELCOME_KIT")
+                            sent += 1
+                        else:
+                            log_email_dispatch(j["EMP ID"], j["Name"], j["Email"], j["Policy"], "FAILED", err, campaign_type="WELCOME_KIT")
+                st.success(f"Dispatched {sent} emails!"); time.sleep(1.5); st.rerun()
+
+        with c_clear:
+            if st.button("🗑️ Clear Pending Queue", use_container_width=True, help="Dismisses remaining incomplete/resigned employees from queue."):
+                db.ecards.update_many(q_filter, {"$set": {"email_sent": True}})
+                st.warning("Pending queue cleared! Counter reset to 0.")
+                time.sleep(1); st.rerun()
+
+        st.markdown("---")
+        st.markdown("##### 📊 7-Day Dispatch Audit & Retry Hub")
+        logs = list(db.email_logs.find({"campaign_type": "WELCOME_KIT"}).sort("timestamp", -1).limit(50))
+        failed_l = [l for l in logs if l["status"] == "FAILED"]
+        
+        if failed_l:
+            if st.button(f"🔄 Re-queue All {len(failed_l)} Failed Emails (1-Click)", type="primary", use_container_width=True, key="t6_retry_fail"):
+                f_ids = list(set([doc["emp_id"] for doc in failed_l]))
+                db.ecards.update_many({"emp_id": {"$in": f_ids}}, {"$set": {"email_sent": False}})
+                db.email_logs.delete_many({"status": "FAILED", "campaign_type": "WELCOME_KIT"})
+                st.success(f"Re-queued {len(f_ids)} failed users!"); time.sleep(1); st.rerun()
+
+        if logs:
+            st.dataframe(pd.DataFrame([{
+                "Time (IST)": (l["timestamp"] + timedelta(hours=5, minutes=30)).strftime("%d-%b %I:%M %p"),
+                "Emp ID": l["emp_id"], "Email": l["recipient_email"], "Status": "✅ " + l["status"] if l["status"]=="DELIVERED" else "❌ " + l["status"],
+                "Error": l.get("error_reason") or "Delivered"
+            } for l in logs]), hide_index=True, use_container_width=True)
+
+# ==============================================================================
+# --- TAB 7: 🚀 PORTAL LAUNCH & BROADCAST (DUAL HR & USER SUB-MODULES) ---
+# ==============================================================================
+with tab_launch:
+    st.markdown("### 🚀 Portal Launch & Feedback Broadcast Center")
+    st.markdown("Broadcast the launch of the **CapitUp Benefits Portal (Beta)** to **Tenant HR Leaders** or **Employees** with customized messaging.")
+    
+    # Live Tenant Discovery
+    live_tenants_map = get_live_tenants_and_policies()
+    discovered_comp_list = sorted(list(live_tenants_map.keys()))
+    
+    col_lt1, col_lt2 = st.columns(2)
+    with col_lt1:
+        camp_launch_opts = ["🌐 All Corporate Clients"] + discovered_comp_list + ["➕ Custom Company Name"]
+        sel_l_comp = st.selectbox("Select Target Client Company:", camp_launch_opts, key="t7_launch_comp")
+        if sel_l_comp == "➕ Custom Company Name":
+            t7_custom_comp = st.text_input("Company Name Override:", placeholder="e.g. STRATEGIC SYSTEMS", key="t7_comp_man")
         else:
-            st.info("🎉 All emails for this campaign have been successfully delivered!")
+            t7_custom_comp = st.text_input("Company Name Override (Optional):", value=sel_l_comp if sel_l_comp != "🌐 All Corporate Clients" else "", key="t7_comp_auto")
 
-        st.divider()
-        st.subheader("✉️ Process Mail Queue")
-        
-        batch_limit = st.number_input("Batch Run Limit", min_value=1, max_value=500, value=min(20, max(1, len(ready_to_send_jobs))), step=1)
-        jobs_to_process = min(len(ready_to_send_jobs), batch_limit)
-        
-        if st.button(f"▶️ Process {jobs_to_process} Ready Jobs", type="primary", use_container_width=True, disabled=(jobs_to_process == 0)):
-            sent_success_count = 0
-            smtp_errors = []
-            skipped_no_card = []
-            
-            progress_bar = st.progress(0)
-            status_update = st.empty()
-            
-            for idx, job in enumerate(ready_to_send_jobs[:jobs_to_process]):
-                emp_id = job["EMP ID"]
-                recipient_email = job["_clean_email"]
-                emp_name = job["Name"]
-                
-                status_update.text(f"Sending email to {emp_name} ({emp_id}) ➡️ {recipient_email}...")
-                cards = get_cards_from_db(emp_id, policy_no=selected_client_policy)
-                
-                if not cards:
-                    skipped_no_card.append(f"Emp ID {emp_id} ({emp_name})")
-                    log_email_dispatch(emp_id, emp_name, recipient_email, selected_client_policy, "FAILED", "E-Card PDF not found in DB")
-                    progress_bar.progress((idx + 1) / jobs_to_process)
-                    continue
-                
-                customized_html = html_body_input.replace("{{name}}", emp_name).replace("{{emp_id}}", emp_id).replace("{{policy_no}}", selected_client_policy).replace("{{deadline}}", active_deadline_text)
-                mail_sent, error_reason = send_multi_ecard_email(recipient_email, subject_line_input, customized_html, cards)
-                
-                if mail_sent:
-                    db.ecards.update_many({"emp_id": emp_id, "policy_no": selected_client_policy}, {"$set": {"email_sent": True}})
-                    log_email_dispatch(emp_id, emp_name, recipient_email, selected_client_policy, "DELIVERED")
-                    sent_success_count += 1
+    with col_lt2:
+        avail_l_pols = live_tenants_map.get(sel_l_comp, []) if sel_l_comp in live_tenants_map else []
+        all_dir_pols = db.directory.distinct("policy_no")
+        combined_l_pols = sorted(list(set(avail_l_pols + all_dir_pols)))
+        l_pol_opts = ["🌐 All Policies"] + combined_l_pols + ["➕ Custom Policy Number"]
+        sel_l_pol = st.selectbox("Select Target Policy Scope:", l_pol_opts, key="t7_launch_pol")
+        if sel_l_pol == "➕ Custom Policy Number":
+            t7_custom_pol = st.text_input("Policy Number Override:", placeholder="e.g. OG-27-1801-8403-00000112", key="t7_pol_man")
+        else:
+            t7_custom_pol = st.text_input("Policy Number Override (Optional):", value=sel_l_pol if sel_l_pol != "🌐 All Policies" else "", key="t7_pol_auto")
+
+    active_launch_comp = t7_custom_comp.strip().upper() if t7_custom_comp else (sel_l_comp if sel_l_comp != "🌐 All Corporate Clients" else "Your Company")
+    active_launch_pol = t7_custom_pol.strip().upper() if t7_custom_pol else (sel_l_pol if sel_l_pol != "🌐 All Policies" else None)
+
+    st.divider()
+    
+    # --- DUAL SUB-MODULE TABS FOR LAUNCH ---
+    subtab_user_launch, subtab_hr_launch = st.tabs(["👤 Employee (User) Launch Broadcast", "🏢 Tenant HR Admin Broadcast"])
+
+    # --------------------------------------------------------------------------
+    # SUB-TAB 1: EMPLOYEE / USER LAUNCH BROADCAST
+    # --------------------------------------------------------------------------
+    with subtab_user_launch:
+        col_u_left, col_u_right = st.columns([1.2, 1])
+        with col_u_left:
+            st.subheader("⚙️ User Launch Assets & Links")
+            c_ug1, c_ug2 = st.columns(2)
+            with c_ug1:
+                if get_asset("user_portal_guide"):
+                    st.success("User Guide Active")
+                    if st.button("Delete User Guide", key="d_upg"): delete_asset("user_portal_guide"); st.rerun()
                 else:
-                    smtp_errors.append(f"Emp ID {emp_id} ({recipient_email}) ➡️ {error_reason}")
-                    log_email_dispatch(emp_id, emp_name, recipient_email, selected_client_policy, "FAILED", error_reason)
+                    up_ug = st.file_uploader("Upload User Guide PDF", type=["pdf"], key="up_upg")
+                    if up_ug: save_asset("user_portal_guide", up_ug.getvalue()); st.rerun()
+            with c_ug2:
+                if get_asset("user_launch_banner"):
+                    st.success("User Banner Active")
+                    if st.button("Delete User Banner", key="d_upb"): delete_asset("user_launch_banner"); st.rerun()
+                else:
+                    up_ub = st.file_uploader("Upload User Banner Image", type=["png", "jpg"], key="up_upb")
+                    if up_ub: save_asset("user_launch_banner", up_ub.getvalue()); st.rerun()
                     
-                progress_bar.progress((idx + 1) / jobs_to_process)
-                
-            status_update.empty()
-            progress_bar.empty()
+            p_url_u = st.text_input("User Portal URL:", value="https://portal.capitupindia.com", key="t7_u_purl")
+            fb_url_base_u = "https://docs.google.com/forms/d/e/1FAIpQLSdpJ-_GbT1AGeD1tIVEMbvF0DtNexO7fz_0nJE1mdKBu6rrag/viewform?usp=pp_url"
+            fb_url_u = st.text_input("User Feedback Form Base URL:", value=fb_url_base_u, key="t7_u_fburl")
+            l_subj_u = st.text_input("User Subject Line:", value="🚀 Welcome to the All-New CapitUp Benefits Portal (Beta)!", key="t7_u_subj")
             
-            if sent_success_count > 0:
-                st.success(f"🎉 Successfully dispatched **{sent_success_count}** welcome emails!")
-            else:
-                st.warning(f"⚠️ Attempted batch, but **0** emails were delivered.")
-                
-            if skipped_no_card:
-                with st.expander(f"🚨 Skipped {len(skipped_no_card)} records (E-Card PDF not found in Database)"):
-                    for item in skipped_no_card: st.write(f"• {item}")
+            logo_tag_u = """<div style="text-align: center; margin-bottom: 15px;"><img src="cid:logo_image" alt="CapitUp India Logo" style="height: 60px; width: auto; display: inline-block;" /></div>""" if get_asset("logo") else ""
+            
+            user_launch_html = f"""<div style="font-family: 'Segoe UI', Arial, sans-serif; color: #333; line-height: 1.6; max-width: 650px; margin: 0 auto; border: 1px solid #C29B38; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.05); background-color: #ffffff;">
+  <div style="background-color: #0B1E30; padding: 30px 24px; text-align: center; border-bottom: 3px solid #C29B38;">
+    {logo_tag_u}
+    <h1 style="color: #ffffff; margin: 0; font-size: 22px; letter-spacing: 1px; font-weight: 800; text-transform: uppercase;">WELCOME TO NEXT-GEN HEALTHCARE ACCESS</h1>
+    <p style="color: #C29B38; margin: 6px 0 0 0; font-size: 11px; font-weight: bold; letter-spacing: 2px;">CAPITUP EMPLOYEE BENEFITS PORTAL (BETA)</p>
+  </div>
+  <!-- BANNER -->
+  <div style="padding: 32px 24px;">
+    <p style="font-size: 15px; margin-top: 0;">Dear <strong>{{{{name}}}}</strong>,</p>
+    <p style="font-size: 14px; color: #444;">We are thrilled to unveil the <strong>CapitUp Employee Health & Benefits Portal (Beta)</strong>—crafted specifically for you and your family at <strong>{{{{company_name}}}}</strong>!</p>
+    <div style="background-color: #F4F6F8; border-left: 4px solid #23C2A9; padding: 18px; margin: 24px 0; border-radius: 6px;">
+      <h3 style="margin-top: 0; color: #0B1E30; font-size: 14px; text-transform: uppercase;">✨ Your Digital Health & Benefits Hub</h3>
+      <ul style="font-size: 13px; padding-left: 20px; margin: 8px 0; color: #444; line-height: 1.6;">
+        <li><strong>⚡ Instant E-Card Wallet:</strong> View & download unified family health cards in seconds.</li>
+        <li><strong>🤖 24/7 AI Policy Copilot:</strong> Ask instant questions about room rent limits, maternity rules, and claim steps.</li>
+        <li><strong>👨‍👩‍👧‍👦 Family Coverage View:</strong> Review covered dependents and Sum Insured limits with total transparency.</li>
+      </ul>
+    </div>
+    <div style="text-align: center; margin: 30px 0;">
+      <a href="{{{{portal_url}}}}" style="background-color: #0B1E30; color: #ffffff; padding: 15px 36px; text-decoration: none; font-size: 14px; font-weight: bold; border-radius: 6px; display: inline-block; border: 2px solid #C29B38;">🌐 Explore the CapitUp Portal</a>
+    </div>
+    <div style="border: 1px solid #C29B38; background-color: #FCF9F2; border-radius: 8px; padding: 20px; margin: 28px 0;">
+      <h3 style="margin-top: 0; color: #0B1E30; font-size: 14px;">🌟 Let's Build This Together (Your Beta Feedback Matters!)</h3>
+      <p style="font-size: 13px; margin: 8px 0; color: #444;">Did you find your cards easily? Tell us what features you would love to see next!</p>
+      <div style="text-align: center; margin-top: 14px;">
+        <a href="{{{{feedback_url}}}}" style="background-color: #23C2A9; color: #ffffff; padding: 12px 26px; text-decoration: none; font-size: 13px; font-weight: bold; border-radius: 6px; display: inline-block;">📝 Share Your Thoughts & Feedback</a>
+      </div>
+    </div>
+  </div>
+  <div style="background-color: #F4F6F8; padding: 24px; text-align: center; border-top: 1px solid #e5e7eb;">
+    <p style="margin: 0; font-size: 12px; color: #0B1E30; font-weight: bold;">CapitUp India Pvt. Ltd. | HITEC City, Hyderabad</p>
+  </div>
+</div>"""
+            u_html = st.text_area("USER EMAIL HTML", value=user_launch_html, height=180, key="t7_u_html")
+            
+            if st.checkbox("👁️ Preview User Email", key="prev_t7_u"):
+                dummy_fb = f"{fb_url_u}&entry.1752786264=MOCK101&entry.1314062294=Employee&entry.2060790789={urllib.parse.quote(active_launch_comp)}"
+                rendered_u = u_html.replace("{{name}}", st.session_state.username).replace("{{emp_id}}", "MOCK-101").replace("{{company_name}}", active_launch_comp).replace("{{portal_url}}", p_url_u).replace("{{feedback_url}}", dummy_fb)
+                st.components.v1.html(rendered_u, height=450, scrolling=True)
+
+        with col_u_right:
+            st.subheader("📢 User Audience & Dispatch")
+            up_u_active = st.file_uploader("Upload Active Employee List (CSV/Excel)", type=["csv", "xlsx"], key="t7_u_active_up")
+            if up_u_active:
+                df_ua = clean_and_align_dataframe(pd.read_csv(up_u_active) if up_u_active.name.endswith('.csv') else pd.read_excel(up_u_active))
+                cols_ua = list(df_ua.columns)
+                c_ua1, c_ua2 = st.columns(2)
+                e_col_u = c_ua1.selectbox("Emp ID Column", cols_ua, key="t7_u_ecol")
+                em_col_u = c_ua1.selectbox("Email Column", cols_ua, key="t7_u_emcol")
+                n_col_u = c_ua2.selectbox("Name Column", cols_ua, key="t7_u_ncol")
+                if st.button("🚀 Sync Employee Roster", type="primary", use_container_width=True, key="btn_sync_t7_u"):
+                    synced_u = 0
+                    for _, r in df_ua.iterrows():
+                        em_val = str(r[em_col_u]).strip().lower()
+                        if em_val in ["nan", "none", "null", "undefined"]: em_val = ""
+                        save_employee_to_directory(str(r[e_col_u]).strip().upper(), str(r[n_col_u]).strip(), em_val, active_launch_pol or "DEFAULT", active_launch_comp, role="EMPLOYEE")
+                        synced_u += 1
+                    st.success(f"Synced {synced_u} active employees!"); time.sleep(1); st.rerun()
+
+            q_u = {"role": "EMPLOYEE"}
+            if active_launch_pol: q_u["policy_no"] = active_launch_pol
+            users_u = list(db.directory.find(q_u))
+            ready_u = [u for u in users_u if not u.get("launch_announced") and u.get("email") and "@" in u.get("email")]
+            st.metric("🟢 Ready to Invite (Employees)", len(ready_u))
+
+            b_lim_u = st.number_input("Batch Limit", min_value=1, max_value=500, value=min(20, max(1, len(ready_u))), key="t7_u_blim")
+            
+            c_up1, c_up2 = st.columns([1.5, 1])
+            with c_up1:
+                if st.button(f"🚀 Send {min(len(ready_u), b_lim_u)} User Invites", type="primary", use_container_width=True, disabled=(len(ready_u)==0), key="btn_send_u_launch"):
+                    sent_u = 0
+                    for u in ready_u[:b_lim_u]:
+                        # PROPER URL-ENCODING FOR PRE-FILLED FORM LINK
+                        encoded_n = urllib.parse.quote(str(u.get("name", "Employee")).strip())
+                        encoded_eid = urllib.parse.quote(str(u["emp_id"]).strip())
+                        encoded_c = urllib.parse.quote(str(active_launch_comp).strip())
+                        dynamic_fb_link = f"{fb_url_u}&entry.1752786264={encoded_eid}&entry.1314062294={encoded_n}&entry.2060790789={encoded_c}"
+                        
+                        body = u_html.replace("{{name}}", u.get("name", "Employee"))\
+                                     .replace("{{emp_id}}", u["emp_id"])\
+                                     .replace("{{company_name}}", active_launch_comp)\
+                                     .replace("{{portal_url}}", p_url_u)\
+                                     .replace("{{feedback_url}}", dynamic_fb_link)
+                                     
+                        ok, err = send_launch_email(u["email"], l_subj_u, body, guide_asset_key="user_portal_guide", banner_asset_key="user_launch_banner")
+                        if ok:
+                            db.directory.update_one({"_id": u["_id"]}, {"$set": {"launch_announced": True}})
+                            log_email_dispatch(u["emp_id"], u.get("name", "Employee"), u["email"], u.get("policy_no", "UNKNOWN"), "DELIVERED", campaign_type="USER_PORTAL_LAUNCH")
+                            sent_u += 1
+                        else:
+                            log_email_dispatch(u["emp_id"], u.get("name", "Employee"), u["email"], u.get("policy_no", "UNKNOWN"), "FAILED", err, campaign_type="USER_PORTAL_LAUNCH")
+                    st.success(f"Broadcasted to {sent_u} employees!"); time.sleep(1.5); st.rerun()
+
+            with c_up2:
+                if st.button("🗑️ Clear Queue", use_container_width=True, key="btn_clear_u_q"):
+                    db.directory.update_many(q_u, {"$set": {"launch_announced": True}})
+                    st.warning("User queue cleared!"); time.sleep(1); st.rerun()
+
+    # --------------------------------------------------------------------------
+    # SUB-TAB 2: TENANT HR ADMIN BROADCAST (IMAGE 2 FEATURES)
+    # --------------------------------------------------------------------------
+    with subtab_hr_launch:
+        col_hr_left, col_hr_right = st.columns([1.2, 1])
+        with col_hr_left:
+            st.subheader("⚙️ HR Admin Launch Assets & Endpoints")
+            c_hrg1, c_hrg2 = st.columns(2)
+            with c_hrg1:
+                if get_asset("hr_portal_guide"):
+                    st.success("HR Guide Active")
+                    if st.button("Delete HR Guide", key="d_hrpg"): delete_asset("hr_portal_guide"); st.rerun()
+                else:
+                    up_hrg = st.file_uploader("Upload HR Admin Guide PDF", type=["pdf"], key="up_hrpg")
+                    if up_hrg: save_asset("hr_portal_guide", up_hrg.getvalue()); st.rerun()
+            with c_hrg2:
+                if get_asset("hr_launch_banner"):
+                    st.success("HR Banner Active")
+                    if st.button("Delete HR Banner", key="d_hrpb"): delete_asset("hr_launch_banner"); st.rerun()
+                else:
+                    up_hrb = st.file_uploader("Upload HR Banner Image", type=["png", "jpg"], key="up_hrpb")
+                    if up_hrb: save_asset("hr_launch_banner", up_hrb.getvalue()); st.rerun()
                     
-            if smtp_errors:
-                with st.expander(f"❌ Failed to Deliver {len(smtp_errors)} Emails (SMTP Errors)"):
-                    for err in smtp_errors: st.error(err)
-                    
-            time.sleep(1.5)
-            st.rerun()
-
-        st.divider()
-
-        # --- SECTION 6: DISPATCH AUDIT LOGS & 1-CLICK RETRY CENTER ---
-        st.subheader("📊 Dispatch History & Smart Retry Center")
-        st.caption("Rolling 7-day delivery audit log. Filter by failure and re-queue in 1 click.")
-        
-        recent_logs = list(db.email_logs.find({"policy_no": selected_client_policy}).sort("timestamp", -1).limit(100))
-        
-        delivered_logs = [l for l in recent_logs if l["status"] == "DELIVERED"]
-        failed_logs = [l for l in recent_logs if l["status"] == "FAILED"]
-        
-        col_log_m1, col_log_m2, col_log_m3 = st.columns(3)
-        col_log_m1.metric("Recent Deliveries", len(delivered_logs))
-        col_log_m2.metric("Recent Failures", len(failed_logs))
-        col_log_m3.metric("Delivery Rate", f"{(len(delivered_logs) / len(recent_logs) * 100):.1f}%" if recent_logs else "N/A")
-        
-        # --- 1-CLICK FAILED EMAIL RETRY BUTTON ---
-        if failed_logs:
-            if st.button(f"🔄 Re-queue All {len(failed_logs)} Failed Emails (1-Click)", type="primary", use_container_width=True, key="btn_requeue_failed_only"):
-                failed_ids = list(set([doc["emp_id"] for doc in failed_logs]))
-                db.ecards.update_many(
-                    {"emp_id": {"$in": failed_ids}, "policy_no": selected_client_policy},
-                    {"$set": {"email_sent": False}}
-                )
-                db.email_logs.delete_many({"policy_no": selected_client_policy, "status": "FAILED"})
-                st.success(f"✅ Successfully re-queued {len(failed_ids)} failed employees for resending!")
-                time.sleep(1.5)
-                st.rerun()
-
-        if recent_logs:
-            log_display_data = []
-            for l in recent_logs:
-                log_display_data.append({
-                    "Time (IST)": (l["timestamp"] + timedelta(hours=5, minutes=30)).strftime("%d-%b %I:%M %p"),
-                    "Emp ID": l["emp_id"],
-                    "Name": l["name"],
-                    "Email": l["recipient_email"],
-                    "Status": "✅ DELIVERED" if l["status"] == "DELIVERED" else "❌ FAILED",
-                    "Error / Notes": l.get("error_reason") or "Delivered successfully"
-                })
-            df_logs = pd.DataFrame(log_display_data)
+            p_url_hr = st.text_input("HR Admin Portal URL:", value="https://admin.capitupindia.com", key="t7_hr_purl")
+            l_subj_hr = st.text_input("HR Subject Line:", value="🏢 Introducing Your CapitUp Corporate Benefits Management Workspace", key="t7_hr_subj")
             
-            log_filter = st.radio("Filter Log History:", ["All Recent Dispatches", "❌ Failed Only", "✅ Delivered Only"], horizontal=True, key="t6_log_filter")
-            if log_filter == "❌ Failed Only":
-                df_logs = df_logs[df_logs["Status"] == "❌ FAILED"]
-            elif log_filter == "✅ Delivered Only":
-                df_logs = df_logs[df_logs["Status"] == "✅ DELIVERED"]
-                
-            st.dataframe(df_logs, hide_index=True, use_container_width=True)
+            logo_tag_hr = """<div style="text-align: center; margin-bottom: 15px;"><img src="cid:logo_image" alt="CapitUp India Logo" style="height: 60px; width: auto; display: inline-block;" /></div>""" if get_asset("logo") else ""
             
-            if st.button("🗑️ Clear Audit History for Campaign", key="btn_clear_logs"):
-                db.email_logs.delete_many({"policy_no": selected_client_policy})
-                st.success("Audit history cleared!")
-                time.sleep(1)
-                st.rerun()
-        else:
-            st.info("No dispatch history recorded for this campaign yet.")
+            hr_launch_html = f"""<div style="font-family: 'Segoe UI', Arial, sans-serif; color: #333; line-height: 1.6; max-width: 650px; margin: 0 auto; border: 1px solid #C29B38; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.05); background-color: #ffffff;">
+  <div style="background-color: #0B1E30; padding: 30px 24px; text-align: center; border-bottom: 3px solid #C29B38;">
+    {logo_tag_hr}
+    <h1 style="color: #ffffff; margin: 0; font-size: 22px; letter-spacing: 1px; font-weight: 800; text-transform: uppercase;">WELCOME TO YOUR HR BENEFITS WORKSPACE</h1>
+    <p style="color: #C29B38; margin: 6px 0 0 0; font-size: 11px; font-weight: bold; letter-spacing: 2px;">POWERED BY CAPITUP CORPORATE INSURTECH</p>
+  </div>
+  <!-- BANNER -->
+  <div style="padding: 32px 24px;">
+    <p style="font-size: 15px; margin-top: 0;">Dear <strong>{{{{name}}}}</strong> (HR / People Ops Team),</p>
+    <p style="font-size: 14px; color: #444;">We are pleased to introduce the all-new <strong>CapitUp Tenant HR Administration Suite</strong> for <strong>{{{{company_name}}}}</strong>.</p>
+    
+    <!-- IMAGE 2 FEATURES HIGHLIGHT -->
+    <div style="background-color: #F4F6F8; border-left: 4px solid #0B1E30; padding: 18px; margin: 24px 0; border-radius: 6px;">
+      <h3 style="margin-top: 0; color: #0B1E30; font-size: 14px; text-transform: uppercase;">⚡ Enterprise Capabilities at Your Fingertips</h3>
+      <ul style="font-size: 13px; padding-left: 20px; margin: 8px 0; color: #444; line-height: 1.6;">
+        <li><strong>📊 Executive Overview:</strong> Real-time tenant analytics, coverage summaries, and live health metrics.</li>
+        <li><strong>👥 Employee Directory & DPDP:</strong> Total control over active employee rosters and data privacy compliance.</li>
+        <li><strong>🔄 Endorsement Engine:</strong> Automated addition/deletion sync with instant pro-rata premium raters.</li>
+        <li><strong>📈 Claims Analytics & MIS Dumps:</strong> Download raw claim MIS sheets and CMO-level AI risk insights.</li>
+        <li><strong>❓ Live Request Queue:</strong> Track employee support tickets and endorsement status in real-time.</li>
+      </ul>
+    </div>
+    <div style="text-align: center; margin: 30px 0;">
+      <a href="{{{{portal_url}}}}" style="background-color: #0B1E30; color: #ffffff; padding: 15px 36px; text-decoration: none; font-size: 14px; font-weight: bold; border-radius: 6px; display: inline-block; border: 2px solid #C29B38;">🏢 Access Your HR Hub</a>
+    </div>
+  </div>
+  <div style="background-color: #F4F6F8; padding: 24px; text-align: center; border-top: 1px solid #e5e7eb;">
+    <p style="margin: 0; font-size: 12px; color: #0B1E30; font-weight: bold;">CapitUp Corporate Enterprise Support | Dedicated Partner Desk</p>
+  </div>
+</div>"""
+            hr_html = st.text_area("HR EMAIL HTML", value=hr_launch_html, height=180, key="t7_hr_html")
+            
+            if st.checkbox("👁️ Preview HR Email", key="prev_t7_hr"):
+                rendered_hr = hr_html.replace("{{name}}", st.session_state.username).replace("{{company_name}}", active_launch_comp).replace("{{portal_url}}", p_url_hr)
+                st.components.v1.html(rendered_hr, height=450, scrolling=True)
 
-        st.divider()
+        with col_hr_right:
+            st.subheader("📢 HR Admin Audience & Dispatch")
+            up_hr_active = st.file_uploader("Upload HR Team Contacts (CSV/Excel)", type=["csv", "xlsx"], key="t7_hr_active_up")
+            if up_hr_active:
+                df_hra = clean_and_align_dataframe(pd.read_csv(up_hr_active) if up_hr_active.name.endswith('.csv') else pd.read_excel(up_hr_active))
+                cols_hra = list(df_hra.columns)
+                c_hra1, c_hra2 = st.columns(2)
+                e_col_hr = c_hra1.selectbox("HR ID / Code", cols_hra, key="t7_hr_ecol")
+                em_col_hr = c_hra1.selectbox("HR Email Column", cols_hra, key="t7_hr_emcol")
+                n_col_hr = c_hra2.selectbox("HR Name Column", cols_hra, key="t7_hr_ncol")
+                if st.button("🚀 Sync HR Admin Contacts", type="primary", use_container_width=True, key="btn_sync_t7_hr"):
+                    synced_hr = 0
+                    for _, r in df_hra.iterrows():
+                        em_val = str(r[em_col_hr]).strip().lower()
+                        if em_val in ["nan", "none", "null", "undefined"]: em_val = ""
+                        save_employee_to_directory(str(r[e_col_hr]).strip().upper(), str(r[n_col_hr]).strip(), em_val, active_launch_pol or "DEFAULT", active_launch_comp, role="HR_ADMIN")
+                        synced_hr += 1
+                    st.success(f"Synced {synced_hr} HR contacts!"); time.sleep(1); st.rerun()
 
-        # --- SECTION 7: ADMIN MANUAL RE-QUEUE CONTROLS ---
-        with st.expander("🛠️ Admin Manual Testing Controls", expanded=False):
-            col_admin_input, col_admin_btn = st.columns([2, 1])
-            reset_target_id = col_admin_input.text_input("Target Employee ID to Re-queue:")
-            if col_admin_btn.button("🔄 Re-queue ID", use_container_width=True) and reset_target_id:
-                db.ecards.update_many({"emp_id": reset_target_id.strip().upper(), "policy_no": selected_client_policy}, {"$set": {"email_sent": False}})
-                st.success(f"Employee {reset_target_id} re-queued!"); time.sleep(1); st.rerun()
-                
-            if st.button("🚨 Re-queue Entire Campaign (Reset All)", type="secondary", use_container_width=True):
-                db.ecards.update_many({"policy_no": selected_client_policy}, {"$set": {"email_sent": False}})
-                st.success("All users in campaign re-queued!"); time.sleep(1); st.rerun()
+            q_hr = {"role": "HR_ADMIN"}
+            if active_launch_pol: q_hr["policy_no"] = active_launch_pol
+            users_hr = list(db.directory.find(q_hr))
+            ready_hr = [u for u in users_hr if not u.get("launch_announced") and u.get("email") and "@" in u.get("email")]
+            st.metric("🟢 Ready to Invite (HR Admins)", len(ready_hr))
 
-# ==============================================================================
-# --- TAB 7: LIGHTNING-FAST FILENAME-BASED FAMILYFICATION ---
-# ==============================================================================
+            b_lim_hr = st.number_input("Batch Limit", min_value=1, max_value=100, value=min(20, max(1, len(ready_hr))), key="t7_hr_blim")
+            
+            c_hrp1, c_hrp2 = st.columns([1.5, 1])
+            with c_hrp1:
+                if st.button(f"🚀 Send {min(len(ready_hr), b_lim_hr)} HR Invites", type="primary", use_container_width=True, disabled=(len(ready_hr)==0), key="btn_send_hr_launch"):
+                    sent_hr = 0
+                    for u in ready_hr[:b_lim_hr]:
+                        body = hr_html.replace("{{name}}", u.get("name", "HR Partner"))\
+                                       .replace("{{company_name}}", active_launch_comp)\
+                                       .replace("{{portal_url}}", p_url_hr)
+                                       
+                        ok, err = send_launch_email(u["email"], l_subj_hr, body, guide_asset_key="hr_portal_guide", banner_asset_key="hr_launch_banner")
+                        if ok:
+                            db.directory.update_one({"_id": u["_id"]}, {"$set": {"launch_announced": True}})
+                            log_email_dispatch(u["emp_id"], u.get("name", "HR Partner"), u["email"], u.get("policy_no", "UNKNOWN"), "DELIVERED", campaign_type="HR_PORTAL_LAUNCH")
+                            sent_hr += 1
+                        else:
+                            log_email_dispatch(u["emp_id"], u.get("name", "HR Partner"), u["email"], u.get("policy_no", "UNKNOWN"), "FAILED", err, campaign_type="HR_PORTAL_LAUNCH")
+                    st.success(f"Broadcasted to {sent_hr} HR leaders!"); time.sleep(1.5); st.rerun()
+
+            with c_hrp2:
+                if st.button("🗑️ Clear HR Queue", use_container_width=True, key="btn_clear_hr_q"):
+                    db.directory.update_many(q_hr, {"$set": {"launch_announced": True}})
+                    st.warning("HR queue cleared!"); time.sleep(1); st.rerun()
+
+# --- TAB 8: FAMILYFICATION ---
 with tab_family:
     st.markdown("### 👨‍👩‍👧‍👦 Lightning-Fast E-Card Familyfication")
-    master_file = st.file_uploader("1. Upload Active List Master Tracker", type=["xlsx", "xls", "csv"], key="fam_master_v3")
-    
-    if master_file:
-        try:
-            if master_file.name.endswith(".csv"): df_fam = pd.read_csv(master_file)
-            else: df_fam = pd.read_excel(master_file)
-        except Exception: df_fam = pd.DataFrame()
-            
-        if not df_fam.empty:
-            df_fam = clean_and_align_dataframe(df_fam)
-            
-            col1, col2 = st.columns(2)
-            with col1: uhid_col = st.selectbox("Select **Card Number / UHID** Column:", df_fam.columns, key="fam_uhid_col")
-            with col2: emp_id_col = st.selectbox("Select **Employee ID** Column:", df_fam.columns, key="fam_emp_col_v3")
-                
-            fam_pdf_files = st.file_uploader("2. Upload Individual E-Card PDFs", type=["pdf"], accept_multiple_files=True, key="fam_pdfs_v3")
-            
-            if fam_pdf_files and st.button("🧬 Fast Merge by Card Number", type="primary", use_container_width=True):
-                df_clean = df_fam.dropna(subset=[uhid_col, emp_id_col])
-                uhid_to_emp = {}
-                for _, row in df_clean.iterrows():
-                    clean_uhid = str(row[uhid_col]).strip().upper()
-                    if clean_uhid.endswith('.0'): clean_uhid = clean_uhid[:-2]
-                    clean_emp = str(row[emp_id_col]).strip().upper()
-                    if clean_uhid: uhid_to_emp[clean_uhid] = clean_emp
-                
-                family_groups = {} 
-                unmatched_pdfs = []
-                progress_bar = st.progress(0)
-                
-                for i, pdf in enumerate(fam_pdf_files):
-                    raw_name = pdf.name.upper()
-                    clean_filename = re.sub(r'(\.PDF|_ECARD|_CARD|_FAMILY).*$', '', raw_name).strip()
-                    matched_emp_id = uhid_to_emp.get(clean_filename)
-                    if not matched_emp_id:
-                        for u_key in uhid_to_emp.keys():
-                            if u_key in clean_filename or clean_filename in u_key:
-                                matched_emp_id = uhid_to_emp[u_key]; break
-                    if matched_emp_id:
-                        if matched_emp_id not in family_groups: family_groups[matched_emp_id] = []
-                        family_groups[matched_emp_id].append((pdf.name, pdf.getvalue()))
-                    else: unmatched_pdfs.append((pdf.name, pdf.getvalue()))
-                    progress_bar.progress((i + 1) / len(fam_pdf_files))
-                    
-                st.success("✅ Mapping complete! Merging PDFs into Family packets...")
-                zip_buffer = BytesIO()
-                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for emp_id, pdf_list in family_groups.items():
-                        merged_pdf = fitz.open()
-                        for (p_name, p_bytes) in pdf_list:
-                            try:
-                                temp_pdf = fitz.open(stream=p_bytes, filetype="pdf")
-                                merged_pdf.insert_pdf(temp_pdf)
-                                temp_pdf.close()
-                            except Exception: pass
-                        merged_pdf_bytes = merged_pdf.tobytes(garbage=4, deflate=True)
-                        zf.writestr(f"Family_Packets/{emp_id}.pdf", merged_pdf_bytes)
-                        merged_pdf.close()
-                    for (p_name, p_bytes) in unmatched_pdfs: zf.writestr(f"Unmatched_Cards/{p_name}", p_bytes)
-                        
-                st.divider()
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Total Cards Processed", len(fam_pdf_files))
-                m2.metric("Families Consolidated", len(family_groups))
-                m3.metric("Unmatched / Orphan Cards", len(unmatched_pdfs))
-                
-                st.download_button("📥 Download Familyfied E-Cards (.zip)", data=zip_buffer.getvalue(), file_name="CapitUp_Family_Ecards.zip", mime="application/zip", type="primary", use_container_width=True)
+    mf = st.file_uploader("Upload Active Tracker", type=["xlsx", "xls", "csv"], key="fam_mf")
+    if mf:
+        df_f = clean_and_align_dataframe(pd.read_csv(mf) if mf.name.endswith('.csv') else pd.read_excel(mf))
+        c_u1, c_u2 = st.columns(2)
+        ucol = c_u1.selectbox("UHID / Card No Column", df_f.columns)
+        ecol = c_u2.selectbox("Employee ID Column", df_f.columns)
+        f_pdfs = st.file_uploader("Upload Cards", type=["pdf"], accept_multiple_files=True, key="fam_pdfs")
+        if f_pdfs and st.button("🧬 Consolidate Families", type="primary", use_container_width=True):
+            u_to_e = {str(r[ucol]).strip().upper().replace('.0', ''): str(r[ecol]).strip().upper() for _, r in df_f.dropna(subset=[ucol, ecol]).iterrows()}
+            fgroups = {}
+            for pdf in f_pdfs:
+                cname = re.sub(r'(\.PDF|_ECARD|_CARD).*$', '', pdf.name.upper()).strip()
+                meid = u_to_e.get(cname) or next((u_to_e[k] for k in u_to_e if k in cname), None)
+                if meid:
+                    if meid not in fgroups: fgroups[meid] = []
+                    fgroups[meid].append(pdf.getvalue())
+            zbuf = BytesIO()
+            with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for eid, bytes_list in fgroups.items():
+                    mpdf = fitz.open()
+                    for b in bytes_list:
+                        td = fitz.open(stream=b, filetype="pdf"); mpdf.insert_pdf(td); td.close()
+                    zf.writestr(f"{eid}_Family_ECard.pdf", mpdf.tobytes(garbage=4, deflate=True))
+                    mpdf.close()
+            st.download_button("📥 Download Family Packets (.zip)", data=zbuf.getvalue(), file_name="Family_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
 
-# ==============================================================================
-# --- TAB 8: COVERAGE GAP FINDER ---
-# ==============================================================================
+# --- TAB 9: GAP FINDER ---
 with tab_gap:
-    st.markdown("### 🔍 Active List vs. ZIP E-Card Coverage Analyzer")
-    col_gap_1, col_gap_2 = st.columns(2)
-    with col_gap_1: gap_excel_file = st.file_uploader("Upload Active List (Excel/CSV)", type=["xlsx", "xls", "csv"], key="gap_analysis_excel")
-    with col_gap_2: gap_zip_file = st.file_uploader("Upload E-Cards ZIP Archive", type=["zip"], key="gap_analysis_zip")
-
-    if gap_excel_file:
-        try:
-            if gap_excel_file.name.endswith(".csv"): df_gap = pd.read_csv(gap_excel_file)
-            else: df_gap = pd.read_excel(gap_excel_file)
-        except Exception: df_gap = pd.DataFrame()
-
-        if not df_gap.empty:
-            df_gap = clean_and_align_dataframe(df_gap)
-            col_sel1, col_sel2 = st.columns(2)
-            with col_sel1: gap_emp_col = st.selectbox("Primary Employee ID Column:", df_gap.columns, key="gap_analysis_emp_col")
-            with col_sel2: gap_alt_col = st.selectbox("Secondary Match Column (Optional):", ["None"] + list(df_gap.columns), key="gap_analysis_alt_col")
-
-            if gap_zip_file:
-                if st.button("🔍 Run Coverage Analyzer", type="primary", use_container_width=True, key="btn_run_gap_analysis"):
-                    with st.spinner("Analyzing coverage gaps..."):
-                        zip_contents = []
-                        try:
-                            with zipfile.ZipFile(gap_zip_file) as z:
-                                for file_info in z.infolist():
-                                    if not file_info.is_dir():
-                                        base_name = os.path.basename(file_info.filename).upper()
-                                        name_no_ext, _ = os.path.splitext(base_name)
-                                        clean_name = re.sub(r"(_ECARDS|_ECARD|_FAMILY_ECARDS|_FAMILY_ECARD|_FAMILY|_CARDS|_CARD)$", "", name_no_ext).strip()
-                                        zip_contents.append({"clean_name": clean_name})
-                        except Exception: st.stop()
-                        zip_filenames = [item["clean_name"] for item in zip_contents]
-
-                        def is_match(target_val, z_filename):
-                            target_val = str(target_val).strip().upper()
-                            z_filename = str(z_filename).strip().upper()
-                            if not target_val or target_val in ["NAN", "NONE", ""]: return False
-                            if target_val == z_filename: return True
-                            pattern = r'\b' + re.escape(target_val) + r'\b'
-                            if re.search(pattern, z_filename): return True
-                            return False
-
-                        has_card_list = []
-                        for idx, row in df_gap.iterrows():
-                            emp_id = str(row[gap_emp_col]).strip().upper()
-                            if emp_id.endswith(".0"): emp_id = emp_id[:-2]
-                            match_found = False
-                            for z_fn in zip_filenames:
-                                if is_match(emp_id, z_fn): match_found = True; break
-                            if not match_found and gap_alt_col != "None":
-                                alt_val = str(row[gap_alt_col]).strip().upper()
-                                if alt_val.endswith(".0"): alt_val = alt_val[:-2]
-                                if alt_val and alt_val not in ["NAN", "NONE", ""]:
-                                    for z_fn in zip_filenames:
-                                        if is_match(alt_val, z_fn): match_found = True; break
-                            has_card_list.append(match_found)
-
-                        df_gap["E_Card_Status_Matched"] = has_card_list
-                        df_matched = df_gap[df_gap["E_Card_Status_Matched"] == True].copy()
-                        df_missing = df_gap[df_gap["E_Card_Status_Matched"] == False].copy()
-
-                        df_missing.drop(columns=["E_Card_Status_Matched"], errors="ignore", inplace=True)
-                        df_matched.drop(columns=["E_Card_Status_Matched"], errors="ignore", inplace=True)
-
-                        st.divider()
-                        m1, m2, m3 = st.columns(3)
-                        m1.metric("Total Members in Tracker", len(df_gap))
-                        m2.metric("Matched E-Cards Found", len(df_matched))
-                        m3.metric("Missing E-Cards (Gaps)", len(df_missing))
-
-                        if not df_missing.empty:
-                            st.warning(f"Identified {len(df_missing)} active member(s) lacking corresponding matches in the ZIP file archive.")
-                            output_buffer = BytesIO()
-                            with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
-                                df_missing.to_excel(writer, index=False, sheet_name="Missing E-Cards")
-                            st.download_button("📥 Download Missing E-Cards Report (.xlsx)", data=output_buffer.getvalue(), file_name="Missing_ECards_Report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
-                        else: st.success("All tracker entries matched corresponding files in the ZIP folder.")
+    st.markdown("### 🔍 Coverage Gap Finder")
+    c_g1, c_g2 = st.columns(2)
+    g_xl = c_g1.file_uploader("Upload Active Tracker", type=["xlsx", "xls", "csv"], key="gap_xl")
+    g_zp = c_g2.file_uploader("Upload E-Cards ZIP", type=["zip"], key="gap_zp")
+    if g_xl and g_zp:
+        df_g = clean_and_align_dataframe(pd.read_csv(g_xl) if g_xl.name.endswith('.csv') else pd.read_excel(g_xl))
+        g_ecol = st.selectbox("Primary Emp ID Column", df_g.columns, key="gap_ecol")
+        if st.button("🔍 Run Analyzer", type="primary", use_container_width=True):
+            with zipfile.ZipFile(g_zp) as z:
+                znames = [re.sub(r'(\.PDF|_ECARD|_CARD|_FAMILY).*$', '', os.path.basename(f.filename).upper()).strip() for f in z.infolist() if not f.is_dir()]
+            matched = df_g[df_g[g_ecol].astype(str).str.strip().str.upper().isin(znames)]
+            missing = df_g[~df_g[g_ecol].astype(str).str.strip().str.upper().isin(znames)]
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total in Tracker", len(df_g))
+            m2.metric("Matched E-Cards", len(matched))
+            m3.metric("Missing Gaps", len(missing))
+            if not missing.empty:
+                st.warning(f"Missing {len(missing)} members.")
+                out = BytesIO()
+                with pd.ExcelWriter(out, engine='openpyxl') as w: missing.to_excel(w, index=False)
+                st.download_button("📥 Download Missing Report (.xlsx)", data=out.getvalue(), file_name="Missing_ECards.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
+            else: st.success("All members matched!")
