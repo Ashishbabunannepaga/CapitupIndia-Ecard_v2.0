@@ -18,8 +18,9 @@ import requests
 import re  
 import secrets  # Cryptographically secure OTP generation
 import urllib.parse  # URL encoding for Google Form pre-fill links
+from dataclasses import dataclass
+from typing import Optional, List
 from werkzeug.security import generate_password_hash, check_password_hash
-from paddleocr import PaddleOCR
 import boto3
 from botocore.client import Config
 from pymongo import MongoClient
@@ -38,13 +39,40 @@ os.environ["GLOG_minloglevel"] = "3"
 os.environ["KMP_WARNINGS"] = "0"       
 warnings.filterwarnings("ignore")      
 
-from parser_worker import extract_metadata_from_text, CardMetadata
-
 # --- STREAMLIT UI CONFIGURATION ---
 st.set_page_config(page_title="CapitUp Dual-POV Benefits Portal", page_icon="🪪", layout="wide")
 
 import pillow_heif
 pillow_heif.register_heif_opener()
+
+# --- STANDALONE RESILIENT METADATA DATACLASS ---
+@dataclass
+class CardMetadata:
+    emp_id: Optional[str] = None
+    name: Optional[str] = None
+    policy_no: Optional[str] = None
+    policy_type: str = "BASE"
+    card_no: Optional[str] = None
+    relationship: str = "SELF"
+    age: Optional[int] = None
+    valid_up_to: Optional[str] = None
+    company_name: Optional[str] = None
+
+# Safe import from parser_worker if available
+try:
+    from parser_worker import extract_metadata_from_text
+except Exception:
+    def extract_metadata_from_text(text):
+        emp_id, pol_no, comp, members, _ = extract_enhanced_ecard_metadata(text, "")
+        first_m = members[0] if members else None
+        return CardMetadata(
+            emp_id=emp_id,
+            name=first_m.name if first_m else None,
+            policy_no=pol_no,
+            company_name=comp,
+            card_no=first_m.card_no if first_m else None,
+            relationship=first_m.relationship if first_m else "SELF"
+        )
 
 DEFAULT_GAS_URL = "https://script.google.com/macros/s/AKfycbwexxFRlk43f3-SP6fH5VsgSeGpf-cDQXkETNlUT8OJ06AlOGirJ39ivP44HszMMNpAFg/exec"
 ALLOWED_DOMAINS = ["capitupindia.com", "capitup.com"]
@@ -260,7 +288,7 @@ def extract_enhanced_ecard_metadata(spatial_text, raw_text=""):
     members = []
     card_numbers_found = []
 
-    # 1. STRICT Employee Code / ID extraction (With word-boundaries and mandatory delimiters)
+    # 1. STRICT Employee Code / ID extraction
     emp_patterns = [
         r"\b(?:EMPLOYEE\s*CODE|EMP\s*CODE)\s*[:\-\#\s]\s*([A-Za-z0-9\/_\-]+)",
         r"\b(?:EMPLOYEE\s*ID|EMP\s*ID|STAFF\s*ID|EMPLOYEE\s*NO|EMP\s*NO)\s*[:\-\#\s]\s*([A-Za-z0-9\/_\-]+)",
@@ -347,6 +375,7 @@ if "r2" in st.secrets:
     )
     R2_ENABLED = True
 
+# --- SAFE LAZY OCR LOADER (ZERO CLOUD CRASHES) ---
 @st.cache_resource(show_spinner=False)
 def load_ocr_engine():
     try:
@@ -354,7 +383,7 @@ def load_ocr_engine():
         logging.getLogger('ppocr').setLevel(logging.ERROR)
         return PaddleOCR(use_textline_orientation=True, lang='en')
     except Exception as e:
-        logging.warning(f"OCR Engine not loaded: {e}")
+        logging.warning(f"PaddleOCR is unavailable in this environment (missing libGL or dependencies): {e}")
         return None
 
 @st.cache_resource
@@ -1038,13 +1067,11 @@ with tab_universal:
                     # TRACKER-ASSISTED MAPPING OVERRIDE
                     if is_tracker_assisted and u_to_e_map:
                         matched_tracker_eid = None
-                        # Check extracted member card numbers
                         for cn in card_numbers_found:
                             clean_cn = str(cn).strip().upper()
                             if clean_cn in u_to_e_map:
                                 matched_tracker_eid = u_to_e_map[clean_cn]
                                 break
-                        # Check filename tokens
                         if not matched_tracker_eid:
                             clean_fn = re.sub(r'(\.PDF|_ECARD|_CARD|_FAMILY).*$', '', pdf_file.name.upper()).strip()
                             if clean_fn in u_to_e_map:
@@ -1102,7 +1129,7 @@ with tab_universal:
         
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             if opt_merge:
-                # Group multi-page cards sharing the same Employee Code (e.g. Page 13 + Page 14 for ABTS160375)
+                # Group multi-page cards sharing the same Employee Code
                 family_groups = {}
                 for card in extracted_cards:
                     eid = card["emp_id"]
@@ -1140,7 +1167,7 @@ with tab_universal:
                     primary_name = group["metadata"][0].name if (group["metadata"] and group["metadata"][0].name) else ""
                     safe_name = re.sub(r'[^A-Za-z0-9]', '_', primary_name).strip('_')
                     
-                    # Strictly construct filename using the chosen format
+                    # Construct filename using chosen format
                     if "Pure Employee ID" in zip_naming_format:
                         save_name = f"{safe_eid}.pdf"
                     elif "Employee ID + Insured Name" in zip_naming_format and safe_name:
@@ -1384,6 +1411,7 @@ with tab_email:
       </table>
     </div>
     
+    <!-- Correction Form Button with Dynamic URL-encoded parameters -->
     <div style="text-align: center; margin: 30px 0;">
       <a href="{{{{correction_url}}}}" style="background-color: #23C2A9; color: #ffffff; padding: 12px 26px; text-decoration: none; font-size: 13px; font-weight: bold; border-radius: 6px; display: inline-block;">📝 Request E-Card Correction</a>
       <p style="color: #C29B38; font-size: 11px; font-weight: bold; margin-top: 8px;">⏱️ Correction Form Window Closes On: {{{{deadline}}}}</p>
@@ -1470,7 +1498,6 @@ with tab_email:
                 for j in ready_jobs[:b_lim]:
                     cards = get_cards_from_db(j["EMP ID"], policy_no=j["Policy"])
                     if cards:
-                        # DYNAMIC URL-ENCODING FOR CORRECTION LINK
                         encoded_n = urllib.parse.quote(str(j["Name"]).strip())
                         encoded_eid = urllib.parse.quote(str(j["EMP ID"]).strip())
                         encoded_p = urllib.parse.quote(str(j["Policy"]).strip())
