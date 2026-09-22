@@ -16,8 +16,8 @@ import ssl
 import certifi
 import requests  
 import re  
-import secrets  
-import urllib.parse  
+import secrets  # Cryptographically secure OTP generation
+import urllib.parse  # URL encoding for Google Form pre-fill links
 from werkzeug.security import generate_password_hash, check_password_hash
 from paddleocr import PaddleOCR
 import boto3
@@ -49,6 +49,15 @@ pillow_heif.register_heif_opener()
 DEFAULT_GAS_URL = "https://script.google.com/macros/s/AKfycbwexxFRlk43f3-SP6fH5VsgSeGpf-cDQXkETNlUT8OJ06AlOGirJ39ivP44HszMMNpAFg/exec"
 ALLOWED_DOMAINS = ["capitupindia.com", "capitup.com"]
 
+# --- GLOBAL BLACKLIST TO PREVENT LABEL CORRUPTION ---
+INVALID_EIDS = {
+    "NAME", "CODE", "ID", "RELATIONSHIP", "DOB", "GENDER", "SELF", 
+    "MEMBERSHIP", "POLICY", "COMPANY", "MPANY", "LTD", "LIMITED", 
+    "PVT", "PRIVATE", "INSURANCE", "HEALTH", "BIRLA", "CAPITAL", 
+    "CARE", "ALLIANZ", "LOMBARD", "UNKNOWN", "NONE", "NAN", "NULL",
+    "CUSTOMER", "SERVICES", "TECHNICAL", "START", "DATE", "END"
+}
+
 # --- GLOBAL UTILITY & HELPERS ---
 def guess_column(columns, keywords, index_fallback=0):
     for col in columns:
@@ -63,12 +72,20 @@ def parse_int_safe(val):
     except ValueError: return None
 
 def clean_and_align_dataframe(df, forced_header_row=None):
-    if df.empty: return df
+    """
+    Intelligently protects valid headers on Row 0 and only scans for multi-row headers
+    if the spreadsheet starts with blank/unnamed rows or title banners.
+    """
+    if df.empty:
+        return df
+
     KEYWORD_BANK = [
         "EMP", "EMPLOYEE", "ID", "MEMBER", "NAME", "INSURED", "EMAIL", "MAIL", 
         "RELATION", "RELATIONSHIP", "POLICY", "CARD", "DOB", "AGE", "GENDER", 
         "GHI", "SUM", "DOJ", "CO", "HAT", "ADDRESS", "UHID", "CODE", "STATUS", "CORP"
     ]
+
+    # 1. If user explicitly picked a header row from the UI
     if forced_header_row is not None and 0 <= forced_header_row < len(df):
         raw_headers = df.iloc[forced_header_row].values
         clean_headers = []
@@ -78,28 +95,39 @@ def clean_and_align_dataframe(df, forced_header_row=None):
             if h_clean in seen:
                 seen[h_clean] += 1
                 h_clean = f"{h_clean}_{seen[h_clean]}"
-            else: seen[h_clean] = 0
+            else:
+                seen[h_clean] = 0
             clean_headers.append(h_clean)
         df.columns = clean_headers
         df = df.iloc[forced_header_row + 1:].reset_index(drop=True)
         return df.dropna(how="all").reset_index(drop=True)
 
+    # 2. Check if current headers are ALREADY valid on Row 0
     cols_str = [str(c).strip().upper() for c in df.columns]
+    current_header_score = sum(1 for c in cols_str if any(kw in c for kw in KEYWORD_BANK))
     unnamed_count = sum(1 for c in cols_str if "UNNAMED" in c or c in ["", "NAN", "NONE"])
-    needs_header_search = (unnamed_count / len(cols_str)) > 0.3 or any(kw in cols_str[0] for kw in ["TOTAL RECORD", "RECORD COUNT", "REPORT", "CLIENT", "LIST"])
+    
+    # If the file already has valid headers on row 0, PRESERVE THEM!
+    if current_header_score >= 2 and (unnamed_count / len(cols_str)) <= 0.3:
+        df.columns = [str(c).strip() for c in df.columns]
+        return df.dropna(how="all").reset_index(drop=True)
+
     best_header_idx = None
-    max_score = 0
+    max_score = current_header_score
     scan_limit = min(15, len(df))
     for r_idx in range(scan_limit):
         row_vals = [str(x).strip().upper() for x in df.iloc[r_idx].values if pd.notna(x)]
         score = 0
         for val in row_vals:
             for kw in KEYWORD_BANK:
-                if kw in val: score += 1; break
+                if kw in val:
+                    score += 1
+                    break
         if score > max_score and score >= 2:
             max_score = score
             best_header_idx = r_idx
-    if best_header_idx is not None and (needs_header_search or max_score >= 3):
+
+    if best_header_idx is not None:
         raw_headers = df.iloc[best_header_idx].values
         clean_headers = []
         seen = {}
@@ -108,10 +136,12 @@ def clean_and_align_dataframe(df, forced_header_row=None):
             if h_clean in seen:
                 seen[h_clean] += 1
                 h_clean = f"{h_clean}_{seen[h_clean]}"
-            else: seen[h_clean] = 0
+            else:
+                seen[h_clean] = 0
             clean_headers.append(h_clean)
         df.columns = clean_headers
         df = df.iloc[best_header_idx + 1:].reset_index(drop=True)
+
     df.columns = [str(c).strip() for c in df.columns]
     return df.dropna(how="all").reset_index(drop=True)
 
@@ -134,6 +164,167 @@ def robust_guess_column(columns, primary_keywords, fallback_keywords=None):
                 kw_up = kw.strip().upper()
                 if len(kw_up) > 1 and kw_up in col: return columns[idx]
     return None
+
+# --- SPATIAL WORD-GRID RECONSTRUCTOR ---
+def get_spatial_text_from_rect(page, rect=None):
+    """
+    Extracts text geometrically (top-to-bottom, left-to-right).
+    Merges side-by-side columns into single coherent lines (e.g. 'EMPLOYEE CODE: ABTS2023046').
+    """
+    try:
+        words = page.get_text("words", clip=rect)
+        if not words:
+            return page.get_text("text", clip=rect)
+
+        sorted_words = sorted(words, key=lambda w: (w[1], w[0]))
+        lines = []
+        current_line = []
+        current_y = None
+        Y_TOLERANCE = 4.0
+
+        for w in sorted_words:
+            w_x0, w_y0, text = w[0], w[1], w[4]
+            if current_y is None or abs(w_y0 - current_y) <= Y_TOLERANCE:
+                current_line.append((w_x0, text))
+                if current_y is None: current_y = w_y0
+            else:
+                current_line.sort(key=lambda item: item[0])
+                lines.append(" ".join([item[1] for item in current_line]))
+                current_line = [(w_x0, text)]
+                current_y = w_y0
+
+        if current_line:
+            current_line.sort(key=lambda item: item[0])
+            lines.append(" ".join([item[1] for item in current_line]))
+
+        return "\n".join(lines)
+    except Exception:
+        return page.get_text("text", clip=rect)
+
+# --- ADAPTIVE MULTI-PAGE & MULTI-ROW BOUNDARY DETECTOR ---
+def detect_card_boundaries_adaptive(page):
+    """
+    Auto-detects layout structure:
+    1. Single-Card Page (e.g. Aditya Birla 1-card landscape): Returns full page (NO CUTTING).
+    2. Multi-Card Stacked Page (e.g. 2 or 3 stacked cards on portrait A4): Cuts at clean midpoints.
+    """
+    page_w = page.rect.width
+    page_h = page.rect.height
+
+    words = page.get_text("words")
+    if not words:
+        return [fitz.Rect(0, 0, page_w, page_h)]
+
+    anchor_y = []
+    for w in words:
+        text_up = w[4].upper().strip(":-#")
+        if text_up in ["EMPLOYEE", "EMPLOYEE_CODE", "EMP_ID", "POLICY_NO", "MASTER_POLICY"]:
+            anchor_y.append(w[1])
+
+    if not anchor_y:
+        for w in words:
+            text_up = w[4].upper().strip(":-#")
+            if text_up in ["INSURANCE", "HEALTHCARE", "MEDICLAIM"]:
+                anchor_y.append(w[1])
+
+    clustered_y = []
+    for y in sorted(anchor_y):
+        if not clustered_y or (y - clustered_y[-1]) > 60:
+            clustered_y.append(y)
+
+    # If only 1 card anchor on the page -> Return Full Page!
+    if len(clustered_y) <= 1:
+        return [fitz.Rect(0, 0, page_w, page_h)]
+
+    cuts = [0]
+    for i in range(len(clustered_y) - 1):
+        mid = (clustered_y[i] + clustered_y[i+1]) / 2.0
+        cuts.append(mid)
+    cuts.append(page_h)
+
+    rects = []
+    for i in range(len(cuts) - 1):
+        rects.append(fitz.Rect(0, cuts[i], page_w, cuts[i+1]))
+    return rects
+
+# --- ENHANCED CARD PARSER (STRICT EMP ID EXTRACTION) ---
+def extract_enhanced_ecard_metadata(spatial_text, raw_text=""):
+    """
+    Extracts Employee Code, Policy No, Company Name, and Member details.
+    Guarantees Employee ID is NEVER corrupted by 'Company Name' or Card/UHID tokens.
+    """
+    combined_text = f"{spatial_text}\n{raw_text}"
+    emp_id = None
+    policy_no = None
+    company_name = None
+    members = []
+    card_numbers_found = []
+
+    # 1. STRICT Employee Code / ID extraction (With word-boundaries and mandatory delimiters)
+    emp_patterns = [
+        r"\b(?:EMPLOYEE\s*CODE|EMP\s*CODE)\s*[:\-\#\s]\s*([A-Za-z0-9\/_\-]+)",
+        r"\b(?:EMPLOYEE\s*ID|EMP\s*ID|STAFF\s*ID|EMPLOYEE\s*NO|EMP\s*NO)\s*[:\-\#\s]\s*([A-Za-z0-9\/_\-]+)",
+        r"\b(?:EMPLOYEE\s*NUMBER|EMP\s*NUM|MEMBER\s*CODE)\s*[:\-\#\s]\s*([A-Za-z0-9\/_\-]+)",
+        r"\b(?:CO\s*CODE|HAT\s*CODE|CO\s*ID|HAT\s*ID)\s*[:\-\#\s]\s*([A-Za-z0-9\/_\-]+)"
+    ]
+    for pat in emp_patterns:
+        m = re.search(pat, combined_text, re.IGNORECASE)
+        if m:
+            cand = m.group(1).strip().upper()
+            if cand not in INVALID_EIDS and not cand.startswith("MPANY") and not cand.startswith("OMPANY"):
+                emp_id = cand
+                break
+
+    # Fallback: Standalone Code Search (e.g. ABTS2023046, CON112, or TIPL/EIN/2421)
+    if not emp_id:
+        standalone_m = re.search(r"\b([A-Z]{2,6}\d{4,10})\b", combined_text)
+        if standalone_m and standalone_m.group(1).upper() not in INVALID_EIDS:
+            emp_id = standalone_m.group(1).upper()
+
+    # 2. Policy Number extraction (GHI / Master policy formats)
+    pol_patterns = [
+        r"POLICY\s*NO\.?\s*[:\-]?\s*([A-Za-z0-9\/\-_]+)",
+        r"MASTER\s*POLICY\s*NO\.?\s*[:\-]?\s*([A-Za-z0-9\/\-_]+)",
+        r"\b(?:GHI|OG|POL)[\w\/\-_]+\b",
+        r"\b\d{1,4}\-\d{1,4}\-\d{1,4}\-\d{4,10}\-\d{1,4}\b"
+    ]
+    for pat in pol_patterns:
+        m = re.search(pat, combined_text, re.IGNORECASE)
+        if m:
+            policy_no = m.group(1).strip().upper() if m.groups() else m.group(0).strip().upper()
+            break
+
+    # 3. Company Name extraction
+    comp_m = re.search(r"Company\s*Name\s*:\s*([^\n\r]+)", combined_text, re.IGNORECASE)
+    if comp_m:
+        company_name = comp_m.group(1).strip().upper()
+    elif "ASA BHANU TECHNICAL SERVICES LIMITED" in combined_text.upper():
+        company_name = "ASA BHANU TECHNICAL SERVICES LIMITED"
+
+    # 4. Member Table Extraction (Name, Membership No, Relationship, DOB)
+    member_row_pattern = r"([A-Za-z\s\.\_]+?)\s+(PT\d+|IL\d+|\d{6,16})\s+(Self|Spouse|Husband|Wife|Son|Daughter|Father|Mother|Child)\s+(\d{2}[\/\-]\d{2}[\/\-]\d{4})"
+    for match in re.finditer(member_row_pattern, combined_text, re.IGNORECASE):
+        m_name, m_uhid, m_rel, m_dob = match.groups()
+        clean_name = m_name.strip(" \t\n\r._")
+        clean_uhid = m_uhid.strip()
+        card_numbers_found.append(clean_uhid)
+        if clean_name and len(clean_name) > 2 and clean_name.upper() not in INVALID_EIDS:
+            members.append(CardMetadata(
+                emp_id=emp_id or "UNKNOWN",
+                name=clean_name,
+                policy_no=policy_no or "UNKNOWN",
+                policy_type="BASE",
+                card_no=clean_uhid,
+                relationship=m_rel.strip().upper(),
+                age=None,
+                valid_up_to=None
+            ))
+
+    # Also extract standalone UHID/Card numbers for mapping assistance
+    uhid_standalone = re.findall(r"\b(IL\d{9,15}|PT\d{7,12}|\d{10,16})\b", combined_text)
+    card_numbers_found.extend(uhid_standalone)
+
+    return emp_id, policy_no, company_name, members, list(set(card_numbers_found))
 
 # --- DATABASE & R2 CREDENTIALS ---
 try:
@@ -158,8 +349,13 @@ if "r2" in st.secrets:
 
 @st.cache_resource(show_spinner=False)
 def load_ocr_engine():
-    logging.getLogger('ppocr').setLevel(logging.ERROR)
-    return PaddleOCR(use_textline_orientation=True, lang='en')
+    try:
+        from paddleocr import PaddleOCR
+        logging.getLogger('ppocr').setLevel(logging.ERROR)
+        return PaddleOCR(use_textline_orientation=True, lang='en')
+    except Exception as e:
+        logging.warning(f"OCR Engine not loaded: {e}")
+        return None
 
 @st.cache_resource
 def get_mongo_client():
@@ -171,7 +367,7 @@ def get_db():
 # --- GOOGLE FORM UTILITIES ---
 def get_form_status(api_url):
     if not api_url or not str(api_url).startswith("http"): return "DISCONNECTED"
-    try: return requests.get(api_url + "?action=status", timeout=4).text.strip().upper()
+    try: return requests.get(api_url + "?action=status", timeout=5).text.strip().upper()
     except Exception: return "DISCONNECTED"
 
 def set_form_status(api_url, action):
@@ -211,7 +407,7 @@ def init_db():
     db.email_logs.create_index("timestamp", expireAfterSeconds=604800)
     db.email_logs.create_index([("policy_no", pymongo.ASCENDING), ("status", pymongo.ASCENDING)])
 
-# --- HIGH-SPEED CACHED R2 & MONGO DISCOVERY ---
+# --- CACHED R2 & MONGO DISCOVERY ---
 @st.cache_data(ttl=60, show_spinner=False)
 def get_live_tenants_and_policies():
     discovered = {}
@@ -278,7 +474,9 @@ def save_card_to_db(emp_id, pdf_bytes, username, family_members, policy_no="UNKN
     if not sanitized_policy: sanitized_policy = "UNKNOWN_POLICY"
     sanitized_company = re.sub(illegal_chars, "", clean_company_name).strip().replace(" ", "_")
     
-    file_key = f"ecards/{sanitized_company}/{sanitized_policy}/{card_type}/{clean_emp_id}.pdf"
+    safe_emp_filename = re.sub(r'[\\/*?:"<>|]', '_', clean_emp_id)
+    file_key = f"ecards/{sanitized_company}/{sanitized_policy}/{card_type}/{safe_emp_filename}.pdf"
+    
     update_payload = {
         "emp_id": clean_emp_id, "policy_no": clean_policy_no, "company_name": clean_company_name,
         "card_type": card_type, "uploaded_by": username, "upload_date": datetime.utcnow(), "email_sent": False  
@@ -604,7 +802,7 @@ if persona_mode == "👤 User (Employee) Self-Service":
     st.caption("Access instant multi-page family E-Cards, review coverage limits, and chat 24/7 with your policy.")
 
     col_u_search, col_u_btn = st.columns([3, 1])
-    user_emp_id = col_u_search.text_input("Enter your Employee ID or Corporate Email:", placeholder="e.g. 771461 or 800042", key="u_emp_search_key")
+    user_emp_id = col_u_search.text_input("Enter your Employee ID or Corporate Email:", placeholder="e.g. 771461, CON112, ABTS2023046, or TIPL/EIN/2421", key="u_emp_search_key")
     
     if user_emp_id:
         clean_uid = user_emp_id.strip().upper()
@@ -636,13 +834,14 @@ if persona_mode == "👤 User (Employee) Self-Service":
                         p_no = c["policy_no"]
                         pdf_b = bytes(c["pdf_data"])
                         
+                        safe_download_id = re.sub(r'[\\/*?:"<>|]', '_', real_emp_id)
                         col_d1, col_d2 = st.columns([1.5, 3])
                         with col_d1:
                             st.markdown(f"**{c_type} Card** | Policy: `{p_no}`")
                             st.download_button(
                                 label=f"📥 Download {c_type} Family Card (.pdf)",
                                 data=pdf_b,
-                                file_name=f"CapitUp_{real_emp_id}_{c_type}_ECard.pdf",
+                                file_name=f"CapitUp_{safe_download_id}_{c_type}_ECard.pdf",
                                 mime="application/pdf",
                                 type="primary",
                                 key=f"btn_dl_{c_idx}"
@@ -707,32 +906,33 @@ if persona_mode == "👤 User (Employee) Self-Service":
 st.title("🏢 Corporate HR Administration & Ingestion Hub")
 
 tab_universal, tab_modular, tab_bulk, tab_directory, tab_search, tab_email, tab_launch, tab_family, tab_gap = st.tabs([
-    "📤 Universal Processing", 
+    "📤 Universal Processing & Familyfication", 
     "📥 Ingest E-Cards", 
     "📥 Bulk Retrieval", 
     "📊 Global Directory", 
     "🔍 Search Individual", 
     "✉️ E-Card Welcome Kit", 
     "🚀 Portal Launch & Feedback",
-    "🧬 Familyfication",
+    "🧬 Standalone Familyfication",
     "🔍 Coverage Gap Finder"
 ])
 
-# --- TAB 1: UNIVERSAL PROCESSING & LIVE R2 TENANT ROUTER ---
+# --- TAB 1: UNIFIED UNIVERSAL INGESTION & TRACKER-ASSISTED FAMILYFICATION ---
 with tab_universal:
-    st.markdown("### 🛠️ Universal Ingestion Engine with Live Cloud Discovery")
-    
+    st.markdown("### 🛠️ Universal Ingestion Engine with Dual AI / Tracker Familyfication")
+    st.caption("Splits master booklets or merges family cards using Direct AI Extraction OR Active Sheet Tracker Mapping.")
+
     live_tenants_map = get_live_tenants_and_policies()
     discovered_comp_list = sorted(list(live_tenants_map.keys()))
     
-    st.markdown("#### 🏢 Target Corporate Tenant & Policy Setup")
+    st.markdown("#### 🏢 1. Target Corporate Tenant & Policy Setup")
     col_c1, col_c2 = st.columns(2)
     with col_c1:
         tenant_opts = ["➕ Custom / New Tenant Name"] + discovered_comp_list
         sel_comp_choice = st.selectbox("Select Client Company (Scanned from Cloud):", tenant_opts, key="u_comp_select")
         
         if sel_comp_choice == "➕ Custom / New Tenant Name":
-            target_company = st.text_input("Enter Tenant / Company Name:", placeholder="e.g. STRATEGIC SYSTEMS IT SOLUTIONS", key="u_comp_input_custom")
+            target_company = st.text_input("Enter Tenant / Company Name:", placeholder="e.g. ASA BHANU TECHNICAL SERVICES LIMITED", key="u_comp_input_custom")
         else:
             target_company = st.text_input("Company Name Override (Optional):", value=sel_comp_choice, key="u_comp_input_override")
 
@@ -742,7 +942,7 @@ with tab_universal:
         sel_pol_choice = st.selectbox("Select Policy Number (Scanned from Cloud):", pol_opts, key="u_pol_select")
         
         if sel_pol_choice == "➕ Custom / New Policy Number":
-            target_policy_override = st.text_input("Enter Policy Number:", placeholder="e.g. OG-27-1801-8403-00000112", key="u_pol_input_custom")
+            target_policy_override = st.text_input("Enter Policy Number:", placeholder="e.g. GHI-91-26-1197393-000", key="u_pol_input_custom")
         else:
             target_policy_override = st.text_input("Policy Number Override (Optional):", value=sel_pol_choice, key="u_pol_input_override")
 
@@ -750,102 +950,244 @@ with tab_universal:
     clean_pol_preview = re.sub(r'[\\/*?:"<>|]', "", target_policy_override).strip().replace(" ", "_").upper() if target_policy_override else "AUTO_DETECT"
     st.info(f"📁 **R2 Destination Path:** `ecards / {clean_comp_preview} / {clean_pol_preview} / [CARD_TYPE] / [EMP_ID].pdf`")
 
-    st.divider()
-    pdf_files = st.file_uploader("Upload E-Card PDF(s)", type=["pdf"], accept_multiple_files=True, key="v1upload")
+    st.markdown("---")
+    st.markdown("#### ⚙️ 2. Select Ingestion Workflow & Family Mapping Mode")
+    
+    ingest_workflow_mode = st.radio(
+        "Workflow Mode:",
+        [
+            "🤖 Pure AI & Document Landmark Extraction (Extracts Employee Code directly from PDF pages)",
+            "🧬 Active Tracker Sheet-Assisted Familyfication (Upload Excel/CSV Tracker to map UHID ➡️ Employee ID)"
+        ],
+        key="u_ingest_workflow_mode"
+    )
 
+    u_to_e_map = {}
+    is_tracker_assisted = "Active Tracker Sheet-Assisted" in ingest_workflow_mode
+
+    if is_tracker_assisted:
+        st.markdown("<div style='background-color: #f0fdf4; border: 1px solid #86efac; padding: 15px; border-radius: 8px; margin: 10px 0;'>", unsafe_allow_html=True)
+        st.markdown("##### 📥 Upload Active Tracker Sheet for Exact Family Consolidation")
+        t_file = st.file_uploader("Upload Active List Tracker (CSV or Excel)", type=["xlsx", "xls", "csv"], key="u_tracker_sheet_in_tab1")
+        if t_file:
+            raw_df_t = pd.read_csv(t_file) if t_file.name.endswith('.csv') else pd.read_excel(t_file)
+            df_t = clean_and_align_dataframe(raw_df_t)
+            cols_t = list(df_t.columns)
+            
+            g_uhid_t = robust_guess_column(cols_t, ["UHID", "CARD NO", "ID CARD NO", "CARD NUMBER", "MEMBER ID"]) or cols_t[0]
+            g_eid_t = robust_guess_column(cols_t, ["EMPLOYEE ID", "EMP ID", "EMPLOYEE CODE", "EMP CODE", "STAFF ID", "CO", "HAT"]) or (cols_t[1] if len(cols_t) > 1 else cols_t[0])
+            
+            c_m1, c_m2 = st.columns(2)
+            sel_uhid_col = c_m1.selectbox("Map Card Number / UHID Column*", cols_t, index=cols_t.index(g_uhid_t), key="u_map_uhid_col")
+            sel_eid_col = c_m2.selectbox("Map Target Employee ID Column*", cols_t, index=cols_t.index(g_eid_t), key="u_map_eid_col")
+            
+            df_clean_t = df_t.dropna(subset=[sel_uhid_col, sel_eid_col])
+            for _, r in df_clean_t.iterrows():
+                u_val = str(r[sel_uhid_col]).strip().upper()
+                if u_val.endswith('.0'): u_val = u_val[:-2]
+                e_val = str(r[sel_eid_col]).strip().upper()
+                if e_val.endswith('.0'): e_val = e_val[:-2]
+                if u_val: u_to_e_map[u_val] = e_val
+            st.success(f"✅ Loaded {len(u_to_e_map)} UHID ➡️ Employee ID mappings from tracker sheet!")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("#### 📄 3. Upload E-Card PDF(s)")
+    pdf_files = st.file_uploader("Upload E-Card PDF(s) (Master Booklets or Individual Cards)", type=["pdf"], accept_multiple_files=True, key="v1upload")
+
+    # Output naming selector
+    col_opt1, col_opt2 = st.columns([2, 1])
+    with col_opt1:
+        zip_naming_format = st.selectbox(
+            "ZIP Output Filename Format:",
+            [
+                "Pure Employee ID (e.g. ABTS2023046.pdf or CON112.pdf) [Recommended]",
+                "Employee ID + Family Suffix (e.g. ABTS2023046_Family_ECard.pdf)",
+                "Employee ID + Insured Name (e.g. ABTS2023046_AKHIL_ANILKUMAR.pdf)"
+            ],
+            key="u_zip_naming_fmt"
+        )
+        
     st.markdown("<div style='background-color: #f8f9fa; padding: 12px; border-radius: 8px; border: 1px solid #dee2e6;'>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
-    with c1: opt_master = st.checkbox("✂️ **Split Master PDF**", value=False)
-    with c2: opt_merge = st.checkbox("🧬 **Group & Merge Families**", value=True)
-    with c3: opt_rename = st.checkbox("🔄 **Smart Rename Files**", value=True)
+    with c1: opt_master = st.checkbox("✂️ **Enable Smart Layout Slicing**", value=True, help="Auto-detects 1-card landscape pages (full uncropped) vs. multi-card stacked rows.")
+    with c2: opt_merge = st.checkbox("🧬 **Group & Merge by Employee Code / Family**", value=True, help="Merges multi-page dependent cards belonging to the same Employee into one single family PDF.")
+    with c3: opt_rename = st.checkbox("🔄 **Smart Rename with Employee Code**", value=True, help="Names output files cleanly using the Employee Code.")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    if pdf_files and st.button("🚀 Process & Ingest E-Cards", type="primary", use_container_width=True):
+    if pdf_files and st.button("🚀 Process, Split & Ingest E-Cards", type="primary", use_container_width=True):
         ocr_engine = load_ocr_engine()
         progress_bar = st.progress(0)
         extracted_cards = [] 
+        
         for idx, pdf_file in enumerate(pdf_files):
             doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-            if opt_master:
-                for page_num in range(len(doc)):
-                    page = doc[page_num]
-                    for rect in detect_card_boundaries(page):
-                        raw_text = page.get_text("text", clip=rect)
-                        parsed_data = extract_metadata_from_text(raw_text)
-                        if not parsed_data.emp_id:
-                            em = re.search(r"(?:EMPLOYEE\s*CODE|EMP\s*ID)\s*[:\-]?\s*([A-Za-z0-9]+)", raw_text, re.IGNORECASE)
-                            if em: parsed_data.emp_id = em.group(1).strip().upper()
-                        if not parsed_data.policy_no:
-                            pm = re.search(r"POLICY\s*NO\.?\s*[:\-]?\s*([A-Za-z0-9\-]+)", raw_text, re.IGNORECASE)
-                            if pm: parsed_data.policy_no = pm.group(1).strip().upper()
+            total_pages = len(doc)
+            
+            for page_num in range(total_pages):
+                page = doc[page_num]
+                
+                # ADAPTIVE SLICER: Full page for 1-card landscape, or clean row slices for multi-card pages
+                slice_rects = detect_card_boundaries_adaptive(page) if opt_master else [page.rect]
+                
+                for rect in slice_rects:
+                    spatial_text = get_spatial_text_from_rect(page, rect)
+                    raw_text = page.get_text("text", clip=rect)
+                    
+                    ext_empid, ext_pol, ext_comp, ext_members, card_numbers_found = extract_enhanced_ecard_metadata(spatial_text, raw_text)
+                    
+                    # TRACKER-ASSISTED MAPPING OVERRIDE
+                    if is_tracker_assisted and u_to_e_map:
+                        matched_tracker_eid = None
+                        # Check extracted member card numbers
+                        for cn in card_numbers_found:
+                            clean_cn = str(cn).strip().upper()
+                            if clean_cn in u_to_e_map:
+                                matched_tracker_eid = u_to_e_map[clean_cn]
+                                break
+                        # Check filename tokens
+                        if not matched_tracker_eid:
+                            clean_fn = re.sub(r'(\.PDF|_ECARD|_CARD|_FAMILY).*$', '', pdf_file.name.upper()).strip()
+                            if clean_fn in u_to_e_map:
+                                matched_tracker_eid = u_to_e_map[clean_fn]
+                        if matched_tracker_eid:
+                            ext_empid = matched_tracker_eid
+                    
+                    # OCR Fallback only if digital text is empty
+                    if (not ext_empid or ext_empid in INVALID_EIDS or ext_empid == "UNKNOWN") and ocr_engine:
+                        try:
+                            pix = page.get_pixmap(clip=rect, dpi=200)
+                            img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+                            res = ocr_engine.ocr(img, cls=False)
+                            if res and res[0]:
+                                ocr_text = " \n ".join([line[1][0] for line in res[0]])
+                                ext_empid, ext_pol, ext_comp, ext_members, card_numbers_found = extract_enhanced_ecard_metadata(spatial_text, ocr_text)
+                                if is_tracker_assisted and u_to_e_map:
+                                    for cn in card_numbers_found:
+                                        if str(cn).strip().upper() in u_to_e_map:
+                                            ext_empid = u_to_e_map[str(cn).strip().upper()]
+                                            break
+                        except Exception: pass
                         
-                        temp_doc = fitz.open()
-                        temp_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                    parsed_meta = extract_metadata_from_text(f"{spatial_text}\n{raw_text}")
+                    final_eid = ext_empid or parsed_meta.emp_id or "UNKNOWN"
+                    final_pol = ext_pol or parsed_meta.policy_no or "UNKNOWN"
+                    final_comp = ext_comp or getattr(parsed_meta, 'company_name', None) or target_company or "GENERAL_CORP"
+                    final_members = ext_members if ext_members else [parsed_meta]
+                    
+                    # Create card page slice
+                    temp_doc = fitz.open()
+                    temp_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                    if rect != page.rect:
                         temp_doc[-1].set_cropbox(rect)
-                        card_bytes = temp_doc.tobytes(garbage=4, deflate=True)
-                        temp_doc.close()
-                        extracted_cards.append({"emp_id": parsed_data.emp_id or "UNKNOWN", "metadata": parsed_data, "bytes": card_bytes, "raw_text": raw_text, "original_name": f"P{page_num}.pdf"})
-            else:
-                if len(doc) > 0:
-                    raw_text = doc[0].get_text("text")
-                    parsed_data = extract_metadata_from_text(raw_text)
-                    if not parsed_data.emp_id:
-                        em = re.search(r"(?:EMPLOYEE\s*CODE|EMP\s*ID)\s*[:\-]?\s*([A-Za-z0-9]+)", raw_text, re.IGNORECASE)
-                        if em: parsed_data.emp_id = em.group(1).strip().upper()
-                    if not parsed_data.policy_no:
-                        pm = re.search(r"POLICY\s*NO\.?\s*[:\-]?\s*([A-Za-z0-9\-]+)", raw_text, re.IGNORECASE)
-                        if pm: parsed_data.policy_no = pm.group(1).strip().upper()
-                    final_emp_id = parsed_data.emp_id or re.sub(r"(_ECARDS|_ECARD|_FAMILY).*$", "", os.path.splitext(pdf_file.name)[0].strip().upper())
-                    extracted_cards.append({"emp_id": final_emp_id or "UNKNOWN", "metadata": parsed_data, "bytes": pdf_file.getvalue(), "raw_text": raw_text, "original_name": pdf_file.name})
+                    card_bytes = temp_doc.tobytes(garbage=4, deflate=True)
+                    temp_doc.close()
+                    
+                    extracted_cards.append({
+                        "emp_id": final_eid,
+                        "policy_no": final_pol,
+                        "company_name": final_comp,
+                        "metadata": final_members,
+                        "bytes": card_bytes,
+                        "raw_text": f"{spatial_text}\n{raw_text}",
+                        "page_num": page_num + 1,
+                        "original_name": f"Page_{page_num + 1}_{final_eid}.pdf"
+                    })
+                    
             doc.close()
             progress_bar.progress((idx + 1) / len(pdf_files))
 
         zip_buffer = BytesIO()
         processed_count = 0
+        unmapped_warnings = []
+        
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             if opt_merge:
+                # Group multi-page cards sharing the same Employee Code (e.g. Page 13 + Page 14 for ABTS160375)
                 family_groups = {}
                 for card in extracted_cards:
                     eid = card["emp_id"]
-                    if eid == "UNKNOWN": continue
-                    if eid not in family_groups: family_groups[eid] = {"bytes": [], "metadata": [], "raw_text": ""}
+                    if eid in INVALID_EIDS or eid == "UNKNOWN" or not eid:
+                        unmapped_warnings.append(f"Page {card['page_num']}: Could not extract Employee Code")
+                        continue
+                    if eid not in family_groups: 
+                        family_groups[eid] = {
+                            "bytes": [], 
+                            "metadata": [], 
+                            "raw_text": "", 
+                            "policy": card["policy_no"], 
+                            "comp": card["company_name"]
+                        }
                     family_groups[eid]["bytes"].append(card["bytes"])
-                    family_groups[eid]["metadata"].append(card["metadata"])
+                    family_groups[eid]["metadata"].extend(card["metadata"])
                     family_groups[eid]["raw_text"] += " " + card["raw_text"]
                 
                 for eid, group in family_groups.items():
                     merged_pdf = fitz.open()
                     for b in group["bytes"]:
-                        tdoc = fitz.open(stream=b, filetype="pdf"); merged_pdf.insert_pdf(tdoc); tdoc.close()
+                        tdoc = fitz.open(stream=b, filetype="pdf")
+                        merged_pdf.insert_pdf(tdoc)
+                        tdoc.close()
                     merged_bytes = merged_pdf.tobytes(garbage=4, deflate=True)
                     merged_pdf.close()
                     
                     card_type = "TOPUP" if any(kw in group["raw_text"].lower() for kw in ["topup", "top up", "super top"]) else "BASE"
-                    p_no = target_policy_override.strip().upper() if target_policy_override else (group["metadata"][0].policy_no or "UNKNOWN_POLICY")
-                    comp_name = target_company.strip().upper() if target_company else (getattr(group["metadata"][0], 'company_name', None) or "GENERAL_CORP")
+                    p_no = target_policy_override.strip().upper() if target_policy_override else (group["policy"] or "UNKNOWN_POLICY")
+                    comp_name = target_company.strip().upper() if target_company else (group["comp"] or "GENERAL_CORP")
                     
                     save_card_to_db(eid, merged_bytes, st.session_state.username, group["metadata"], p_no, card_type, comp_name)
-                    save_name = f"{eid}_ECard.pdf" if opt_rename else f"Family_{eid}.pdf"
+                    
+                    safe_eid = re.sub(r'[\\/*?:"<>|]', '_', eid)
+                    primary_name = group["metadata"][0].name if (group["metadata"] and group["metadata"][0].name) else ""
+                    safe_name = re.sub(r'[^A-Za-z0-9]', '_', primary_name).strip('_')
+                    
+                    # Strictly construct filename using the chosen format
+                    if "Pure Employee ID" in zip_naming_format:
+                        save_name = f"{safe_eid}.pdf"
+                    elif "Employee ID + Insured Name" in zip_naming_format and safe_name:
+                        save_name = f"{safe_eid}_{safe_name}.pdf"
+                    else:
+                        save_name = f"{safe_eid}_Family_ECard.pdf" if opt_rename else f"Family_{safe_eid}.pdf"
+                        
                     zip_file.writestr(save_name, merged_bytes)
                     processed_count += 1
             else:
                 for idx_c, card in enumerate(extracted_cards):
                     eid = card["emp_id"]
-                    if eid == "UNKNOWN": continue
+                    if eid in INVALID_EIDS or eid == "UNKNOWN" or not eid:
+                        unmapped_warnings.append(f"Page {card['page_num']}: Could not extract Employee Code")
+                        continue
+                        
                     card_type = "TOPUP" if any(kw in card["raw_text"].lower() for kw in ["topup", "top up", "super top"]) else "BASE"
-                    p_no = target_policy_override.strip().upper() if target_policy_override else (card["metadata"].policy_no or "UNKNOWN_POLICY")
-                    comp_name = target_company.strip().upper() if target_company else (getattr(card["metadata"], 'company_name', None) or "GENERAL_CORP")
-                    save_card_to_db(eid, card["bytes"], st.session_state.username, [card["metadata"]], p_no, card_type, comp_name)
-                    save_name = f"{eid}_{idx_c}_ECard.pdf" if opt_rename else card["original_name"]
+                    p_no = target_policy_override.strip().upper() if target_policy_override else (card["policy_no"] or "UNKNOWN_POLICY")
+                    comp_name = target_company.strip().upper() if target_company else (card["company_name"] or "GENERAL_CORP")
+                    
+                    save_card_to_db(eid, card["bytes"], st.session_state.username, card["metadata"], p_no, card_type, comp_name)
+                    
+                    safe_eid = re.sub(r'[\\/*?:"<>|]', '_', eid)
+                    primary_name = card["metadata"][0].name if card["metadata"] else ""
+                    safe_name = re.sub(r'[^A-Za-z0-9]', '_', primary_name).strip('_')
+                    
+                    if "Pure Employee ID" in zip_naming_format:
+                        save_name = f"{safe_eid}.pdf"
+                    elif "Employee ID + Insured Name" in zip_naming_format and safe_name:
+                        save_name = f"{safe_eid}_{safe_name}.pdf"
+                    else:
+                        save_name = f"{safe_eid}_ECard.pdf" if opt_rename else card["original_name"]
+                        
                     zip_file.writestr(save_name, card["bytes"])
                     processed_count += 1
 
         st.session_state.zip_data = zip_buffer.getvalue()
         gc.collect(); progress_bar.progress(1.0)
-        st.cache_data.clear() # Clear cache to show new client immediately
-        st.success(f"✅ Ingestion Complete! Saved **{processed_count}** files to Tenant: **{clean_comp_preview}**.")
+        st.cache_data.clear()
+        
+        st.success(f"✅ Ingestion Complete! Processed **{len(extracted_cards)}** page cards into **{processed_count}** family files named by Employee ID for **{clean_comp_preview}**.")
+        if unmapped_warnings:
+            with st.expander(f"⚠️ View Unmapped Cards ({len(unmapped_warnings)} items)"):
+                for w in unmapped_warnings: st.write(w)
+                
         if st.session_state.get('zip_data'):
-            st.download_button("📥 Download Output ZIP", data=st.session_state.zip_data, file_name=f"{clean_comp_preview}_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
+            st.download_button("📥 Download Final Output ZIP", data=st.session_state.zip_data, file_name=f"{clean_comp_preview}_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
 
 # --- TAB 2: MODULAR INGESTION ---
 with tab_modular:
@@ -909,7 +1251,9 @@ with tab_bulk:
         if found:
             zbuf = BytesIO()
             with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for c in found: zf.writestr(f"{c['policy_no']}_{c['emp_id']}_{c['card_type']}.pdf", bytes(c['pdf_data']))
+                for c in found: 
+                    safe_eid = re.sub(r'[\\/*?:"<>|]', '_', c['emp_id'])
+                    zf.writestr(f"{c['policy_no']}_{safe_eid}_{c['card_type']}.pdf", bytes(c['pdf_data']))
             st.download_button("📥 Download Batch ZIP", data=zbuf.getvalue(), file_name="Bulk_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
             st.success(f"Packaged {len(found)} cards.")
         else: st.error("No matching cards found.")
@@ -927,7 +1271,7 @@ with tab_directory:
 # --- TAB 5: SEARCH INDIVIDUAL ---
 with tab_search:
     col_s1, col_s2 = st.columns([3, 1])
-    s_id = col_s1.text_input("Enter Employee ID:", placeholder="e.g. 771461")
+    s_id = col_s1.text_input("Enter Employee ID:", placeholder="e.g. 771461, CON112, ABTS2023046, or TIPL/EIN/2421")
     s_pol = st.text_input("Policy Number (Optional):")
     if col_s2.button("🔍 Search", use_container_width=True) and s_id:
         cards = get_cards_from_db(s_id, policy_no=s_pol)
@@ -937,7 +1281,8 @@ with tab_search:
             if members: st.dataframe(pd.DataFrame(members).drop(columns=['_id', 'id', 'emp_id'], errors='ignore'), hide_index=True, use_container_width=True)
             for c in cards:
                 pdf_b = bytes(c["pdf_data"])
-                st.download_button(f"📥 Download {c['card_type']} ({c['policy_no']})", data=pdf_b, file_name=f"{s_id}_{c['card_type']}.pdf", mime="application/pdf")
+                safe_s_id = re.sub(r'[\\/*?:"<>|]', '_', s_id)
+                st.download_button(f"📥 Download {c['card_type']} ({c['policy_no']})", data=pdf_b, file_name=f"{safe_s_id}_{c['card_type']}.pdf", mime="application/pdf")
                 pdoc = fitz.open(stream=pdf_b, filetype="pdf")
                 for pnum in range(len(pdoc)): st.image(pdoc[pnum].get_pixmap(dpi=150).tobytes("png"), use_container_width=True)
                 pdoc.close()
@@ -1038,8 +1383,10 @@ with tab_email:
         <tr><td style="font-weight: bold; color: #0B1E30; padding: 3px 0;">Policy Number:</td><td style="color: #333;">{{{{policy_no}}}}</td></tr>
       </table>
     </div>
+    
     <div style="text-align: center; margin: 30px 0;">
-      <p style="color: #C29B38; font-size: 11px; font-weight: bold;">⏱️ Correction Form Window Closes On: {{{{deadline}}}}</p>
+      <a href="{{{{correction_url}}}}" style="background-color: #23C2A9; color: #ffffff; padding: 12px 26px; text-decoration: none; font-size: 13px; font-weight: bold; border-radius: 6px; display: inline-block;">📝 Request E-Card Correction</a>
+      <p style="color: #C29B38; font-size: 11px; font-weight: bold; margin-top: 8px;">⏱️ Correction Form Window Closes On: {{{{deadline}}}}</p>
     </div>
   </div>
   <!-- FOOTER -->
@@ -1051,7 +1398,13 @@ with tab_email:
         html_in = st.text_area("HTML BODY TEMPLATE", value=brand_html_template, height=200, key="t6_html_tmpl")
         
         if st.checkbox("👁️ Live Preview", key="prev_t6"):
-            rendered_t6 = html_in.replace("{{name}}", st.session_state.username).replace("{{emp_id}}", "MOCK-101").replace("{{company_name}}", active_display_company).replace("{{policy_no}}", active_scope_policy or "OG-27-1801-8403-00000112").replace("{{deadline}}", dline)
+            dummy_corr = "https://docs.google.com/forms/d/e/YOUR_FORM_ID/viewform?usp=pp_url&entry.877007954=Employee&entry.863990631=MOCK101&entry.1115400795=OG-27-1801-8403-00000112"
+            rendered_t6 = html_in.replace("{{name}}", st.session_state.username)\
+                                 .replace("{{emp_id}}", "MOCK-101")\
+                                 .replace("{{company_name}}", active_display_company)\
+                                 .replace("{{policy_no}}", active_scope_policy or "OG-27-1801-8403-00000112")\
+                                 .replace("{{deadline}}", dline)\
+                                 .replace("{{correction_url}}", dummy_corr)
             st.components.v1.html(rendered_t6, height=450, scrolling=True)
 
     with col_l2:
@@ -1078,7 +1431,7 @@ with tab_email:
                         synced_c += 1
                 st.success(f"Synced {synced_c} primary employees!"); time.sleep(1); st.rerun()
 
-        # HIGH-SPEED BATCH QUERY: Eliminated N+1 MongoDB Network Calls
+        # SINGLE-QUERY BATCH FETCH (HIGH SPEED)
         q_filter = {"email_sent": {"$ne": True}}
         if active_scope_policy: q_filter["policy_no"] = active_scope_policy
             
@@ -1117,7 +1470,19 @@ with tab_email:
                 for j in ready_jobs[:b_lim]:
                     cards = get_cards_from_db(j["EMP ID"], policy_no=j["Policy"])
                     if cards:
-                        body = html_in.replace("{{name}}", j["Name"]).replace("{{emp_id}}", j["EMP ID"]).replace("{{company_name}}", active_display_company).replace("{{policy_no}}", j["Policy"]).replace("{{deadline}}", dline)
+                        # DYNAMIC URL-ENCODING FOR CORRECTION LINK
+                        encoded_n = urllib.parse.quote(str(j["Name"]).strip())
+                        encoded_eid = urllib.parse.quote(str(j["EMP ID"]).strip())
+                        encoded_p = urllib.parse.quote(str(j["Policy"]).strip())
+                        dynamic_corr_link = f"https://docs.google.com/forms/d/e/1FAIpQLSfMZ0SHY4pr9NVfZwHQRhU6Jmy-vN2K8INePRdkYQarVA_EMw/viewform?usp=pp_url&entry.877007954={encoded_n}&entry.863990631={encoded_eid}&entry.1115400795={encoded_p}"
+                        
+                        body = html_in.replace("{{name}}", j["Name"])\
+                                      .replace("{{emp_id}}", j["EMP ID"])\
+                                      .replace("{{company_name}}", active_display_company)\
+                                      .replace("{{policy_no}}", j["Policy"])\
+                                      .replace("{{deadline}}", dline)\
+                                      .replace("{{correction_url}}", dynamic_corr_link)
+                                      
                         ok, err = send_multi_ecard_email(j["Email"], subj_in, body, cards)
                         if ok:
                             db.ecards.update_many({"emp_id": j["EMP ID"], "policy_no": j["Policy"]}, {"$set": {"email_sent": True}})
@@ -1158,6 +1523,7 @@ with tab_email:
 # ==============================================================================
 with tab_launch:
     st.markdown("### 🚀 Portal Launch & Feedback Broadcast Center")
+    st.markdown("Broadcast the launch of the **CapitUp Benefits Portal (Beta)** to **Tenant HR Leaders** or **Employees** with customized messaging.")
     
     live_tenants_map = get_live_tenants_and_policies()
     discovered_comp_list = sorted(list(live_tenants_map.keys()))
@@ -1238,7 +1604,7 @@ with tab_launch:
       <a href="{{{{portal_url}}}}" style="background-color: #0B1E30; color: #ffffff; padding: 15px 36px; text-decoration: none; font-size: 14px; font-weight: bold; border-radius: 6px; display: inline-block; border: 2px solid #C29B38;">🌐 Explore the CapitUp Portal</a>
     </div>
     <div style="border: 1px solid #C29B38; background-color: #FCF9F2; border-radius: 8px; padding: 20px; margin: 28px 0;">
-      <h3 style="margin-top: 0; color: #0B1E30; font-size: 14px;">🌟 Let's Build This Together (Your Beta Feedback Matters!)</h3>
+      <h3 style="margin-top: 0; color: #0B1E30; font-size: 14px;">🌟 Shape Your Corporate Benefits Experience (Your Beta Feedback Matters!)</h3>
       <p style="font-size: 13px; margin: 8px 0; color: #444;">Did you find your cards easily? Tell us what features you would love to see next!</p>
       <div style="text-align: center; margin-top: 14px;">
         <a href="{{{{feedback_url}}}}" style="background-color: #23C2A9; color: #ffffff; padding: 12px 26px; text-decoration: none; font-size: 13px; font-weight: bold; border-radius: 6px; display: inline-block;">📝 Share Your Thoughts & Feedback</a>
@@ -1380,7 +1746,10 @@ with tab_launch:
             
             if st.checkbox("👁️ Preview HR Email", key="prev_t7_hr"):
                 dummy_fb_hr = f"{fb_url_hr}&entry.1752786264=HR101&entry.1314062294=HR%20Partner&entry.2060790789={urllib.parse.quote(active_launch_comp)}"
-                rendered_hr = hr_html.replace("{{name}}", st.session_state.username).replace("{{company_name}}", active_launch_comp).replace("{{portal_url}}", p_url_hr).replace("{{feedback_url}}", dummy_fb_hr)
+                rendered_hr = hr_html.replace("{{name}}", st.session_state.username)\
+                                     .replace("{{company_name}}", active_launch_comp)\
+                                     .replace("{{portal_url}}", p_url_hr)\
+                                     .replace("{{feedback_url}}", dummy_fb_hr)
                 st.components.v1.html(rendered_hr, height=450, scrolling=True)
 
         with col_hr_right:
@@ -1440,33 +1809,133 @@ with tab_launch:
                     db.directory.update_many(q_hr, {"$set": {"launch_announced": True}})
                     st.warning("HR queue cleared!"); time.sleep(1); st.rerun()
 
-# --- TAB 8: FAMILYFICATION ---
+        # 7-Day History and 1-Click Retry
+        st.markdown("---")
+        st.markdown("##### 📊 7-Day Launch Campaign Audit & Retry Hub")
+        
+        l_logs_q = {"campaign_type": {"$in": ["USER_PORTAL_LAUNCH", "HR_PORTAL_LAUNCH"]}}
+        if active_launch_pol: l_logs_q["policy_no"] = active_launch_pol
+        
+        recent_launch_logs = list(db.email_logs.find(l_logs_q).sort("timestamp", -1).limit(50))
+        failed_launch_logs = [l for l in recent_launch_logs if l["status"] == "FAILED"]
+        
+        if failed_launch_logs:
+            if st.button(f"🔄 Re-queue All {len(failed_launch_logs)} Failed Invitations (1-Click)", type="primary", use_container_width=True, key="btn_retry_launch_failed"):
+                failed_launch_ids = list(set([doc["emp_id"] for doc in failed_launch_logs]))
+                db.directory.update_many(
+                    {"emp_id": {"$in": failed_launch_ids}},
+                    {"$set": {"launch_announced": False}}
+                )
+                db.email_logs.delete_many({"campaign_type": {"$in": ["USER_PORTAL_LAUNCH", "HR_PORTAL_LAUNCH"]}, "status": "FAILED"})
+                st.success(f"✅ Re-queued {len(failed_launch_ids)} failed users for launch invitation!")
+                time.sleep(1.5); st.rerun()
+
+        if recent_launch_logs:
+            st.dataframe(pd.DataFrame([{
+                "Time (IST)": (l["timestamp"] + timedelta(hours=5, minutes=30)).strftime("%d-%b %I:%M %p"),
+                "Emp ID": l["emp_id"], "Email": l["recipient_email"], "Status": "✅ " + l["status"] if l["status"]=="DELIVERED" else "❌ " + l["status"],
+                "Campaign": l.get("campaign_type", "LAUNCH"), "Error": l.get("error_reason") or "Delivered"
+            } for l in recent_launch_logs]), hide_index=True, use_container_width=True)
+            
+            if st.button("🗑️ Clear Launch Campaign History", key="btn_clear_launch_logs"):
+                db.email_logs.delete_many(l_logs_q)
+                st.success("Launch history cleared!")
+                time.sleep(1); st.rerun()
+        else:
+            st.info("No launch dispatch history recorded yet.")
+
+        with st.expander("🛠️ Re-Queue & Reset Launch Campaign", expanded=False):
+            if st.button("🚨 Reset All Users in Scope (Allow Re-Broadcasting)", type="secondary", use_container_width=True, key="btn_reset_launch_all"):
+                db.directory.update_many(q_l, {"$set": {"launch_announced": False}})
+                st.success("All users in scope re-queued for launch announcement!")
+                time.sleep(1); st.rerun()
+
+# --- TAB 8: STANDALONE FAST FAMILYFICATION ---
 with tab_family:
-    st.markdown("### 👨‍👩‍👧‍👦 Lightning-Fast E-Card Familyfication")
-    mf = st.file_uploader("Upload Active Tracker", type=["xlsx", "xls", "csv"], key="fam_mf")
+    st.markdown("### 🧬 Standalone Fast E-Card Familyfication Engine")
+    st.caption("Quickly merges individual card PDF files into family bundles via Active Sheet Mapping (ZIP Output only).")
+
+    mf = st.file_uploader("1. Upload Active List Master Tracker (CSV/Excel)", type=["xlsx", "xls", "csv"], key="fam_mf")
     if mf:
         df_f = clean_and_align_dataframe(pd.read_csv(mf) if mf.name.endswith('.csv') else pd.read_excel(mf))
         c_u1, c_u2 = st.columns(2)
-        ucol = c_u1.selectbox("UHID / Card No Column", df_f.columns)
-        ecol = c_u2.selectbox("Employee ID Column", df_f.columns)
-        f_pdfs = st.file_uploader("Upload Cards", type=["pdf"], accept_multiple_files=True, key="fam_pdfs")
-        if f_pdfs and st.button("🧬 Consolidate Families", type="primary", use_container_width=True):
-            u_to_e = {str(r[ucol]).strip().upper().replace('.0', ''): str(r[ecol]).strip().upper() for _, r in df_f.dropna(subset=[ucol, ecol]).iterrows()}
+        
+        g_uhid = robust_guess_column(df_f.columns, ["UHID", "ID CARD NO", "CARD NO", "CARD NUMBER", "MEMBER ID"]) or df_f.columns[0]
+        g_eid = robust_guess_column(df_f.columns, ["EMPLOYEE ID", "EMP ID", "EMPLOYEE CODE", "EMP CODE", "STAFF ID", "CO", "HAT"]) or (df_f.columns[1] if len(df_f.columns) > 1 else df_f.columns[0])
+
+        idx_u = list(df_f.columns).index(g_uhid) if g_uhid in df_f.columns else 0
+        idx_e = list(df_f.columns).index(g_eid) if g_eid in df_f.columns else min(1, len(df_f.columns)-1)
+
+        ucol = c_u1.selectbox("Card Number / UHID Column*", df_f.columns, index=idx_u, key="fam_uhid_col")
+        ecol = c_u2.selectbox("Employee ID Column*", df_f.columns, index=idx_e, key="fam_emp_col_v3")
+        
+        naming_format = st.selectbox(
+            "Output Filename Format for Slashes in IDs (e.g. TIPL/EIN/2421 or CON112):",
+            [
+                "Flat with Underscores (e.g. TIPL_EIN_2421_Family_ECard.pdf) [Recommended]",
+                "Flat with Hyphens (e.g. TIPL-EIN-2421_Family_ECard.pdf)",
+                "Preserve Sub-folders (e.g. TIPL/EIN/2421_Family_ECard.pdf)"
+            ],
+            key="fam_naming_fmt"
+        )
+        
+        f_pdfs = st.file_uploader("2. Upload Individual E-Card PDFs to Merge", type=["pdf"], accept_multiple_files=True, key="fam_pdfs")
+        
+        if f_pdfs and st.button("🧬 Consolidate Families (ZIP only)", type="primary", use_container_width=True):
+            df_clean = df_f.dropna(subset=[ucol, ecol])
+            u_to_e = {}
+            for _, r in df_clean.iterrows():
+                raw_u = str(r[ucol]).strip().upper()
+                if raw_u.endswith('.0'): raw_u = raw_u[:-2]
+                raw_e = str(r[ecol]).strip().upper()
+                if raw_e.endswith('.0'): raw_e = raw_e[:-2]
+                if raw_u:
+                    u_to_e[raw_u] = raw_e
+
             fgroups = {}
-            for pdf in f_pdfs:
-                cname = re.sub(r'(\.PDF|_ECARD|_CARD).*$', '', pdf.name.upper()).strip()
-                meid = u_to_e.get(cname) or next((u_to_e[k] for k in u_to_e if k in cname), None)
+            unmatched = []
+            progress_bar = st.progress(0)
+            
+            for idx_p, pdf in enumerate(f_pdfs):
+                cname = re.sub(r'(\.PDF|_ECARD|_CARD|_FAMILY).*$', '', pdf.name.upper()).strip()
+                meid = u_to_e.get(cname) or next((u_to_e[k] for k in u_to_e if k in cname or cname in k), None)
                 if meid:
                     if meid not in fgroups: fgroups[meid] = []
-                    fgroups[meid].append(pdf.getvalue())
+                    fgroups[meid].append((pdf.name, pdf.getvalue()))
+                else:
+                    unmatched.append((pdf.name, pdf.getvalue()))
+                progress_bar.progress((idx_p + 1) / len(f_pdfs))
+                    
             zbuf = BytesIO()
             with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for eid, bytes_list in fgroups.items():
                     mpdf = fitz.open()
-                    for b in bytes_list:
-                        td = fitz.open(stream=b, filetype="pdf"); mpdf.insert_pdf(td); td.close()
-                    zf.writestr(f"{eid}_Family_ECard.pdf", mpdf.tobytes(garbage=4, deflate=True))
+                    for (pname, pbytes) in bytes_list:
+                        td = fitz.open(stream=pbytes, filetype="pdf")
+                        mpdf.insert_pdf(td)
+                        td.close()
+                        
+                    if "Underscores" in naming_format:
+                        safe_eid = re.sub(r'[\\/*?:"<>|]', '_', eid)
+                        final_save_path = f"{safe_eid}_Family_ECard.pdf"
+                    elif "Hyphens" in naming_format:
+                        safe_eid = re.sub(r'[\\/*?:"<>|]', '-', eid)
+                        final_save_path = f"{safe_eid}_Family_ECard.pdf"
+                    else:
+                        final_save_path = f"{eid}_Family_ECard.pdf"
+                        
+                    zf.writestr(final_save_path, mpdf.tobytes(garbage=4, deflate=True))
                     mpdf.close()
+                    
+                for uname, ubytes in unmatched:
+                    zf.writestr(f"Unmatched_Cards/{uname}", ubytes)
+                    
+            st.divider()
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total Cards Uploaded", len(f_pdfs))
+            m1.metric("Families Consolidated", len(fgroups))
+            m3.metric("Unmatched Cards", len(unmatched))
+            
             st.download_button("📥 Download Family Packets (.zip)", data=zbuf.getvalue(), file_name="Family_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
 
 # --- TAB 9: GAP FINDER ---
