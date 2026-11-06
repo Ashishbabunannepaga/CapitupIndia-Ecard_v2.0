@@ -381,7 +381,10 @@ def load_ocr_engine():
     try:
         from paddleocr import PaddleOCR
         logging.getLogger('ppocr').setLevel(logging.ERROR)
-        return PaddleOCR(use_textline_orientation=True, lang='en')
+        # paddleocr 2.7.x args. Angle classifier off (the .ocr() call uses cls=False anyway),
+        # MKLDNN off and few threads to keep RAM inside Streamlit Community Cloud limits.
+        return PaddleOCR(use_angle_cls=False, lang='en', show_log=False,
+                         enable_mkldnn=False, cpu_threads=2, rec_batch_num=4)
     except Exception as e:
         logging.warning(f"PaddleOCR is unavailable in this environment (missing libGL or dependencies): {e}")
         return None
@@ -769,7 +772,7 @@ if not st.session_state.logged_in:
             with st.form("login_form"):
                 user_input = st.text_input("Username or Corporate Email")
                 pass_input = st.text_input("Password", type="password")
-                if st.form_submit_button("Login", use_container_width=True, type="primary"):
+                if st.form_submit_button("Login", width="stretch", type="primary"):
                     if authenticate_user(user_input.strip(), pass_input):
                         st.session_state.logged_in = True
                         st.session_state.username = user_input.strip()
@@ -782,7 +785,7 @@ if not st.session_state.logged_in:
                     reg_user = st.text_input("Choose a Username*")
                     reg_pass = st.text_input("Choose Password (Min 8 chars)*", type="password")
                     reg_confirm = st.text_input("Confirm Password*", type="password")
-                    if st.form_submit_button("📩 Send Verification OTP", use_container_width=True, type="primary"):
+                    if st.form_submit_button("📩 Send Verification OTP", width="stretch", type="primary"):
                         clean_email, clean_user = reg_email.strip().lower(), reg_user.strip()
                         if not clean_email or not clean_user or not reg_pass: st.warning("⚠️ Fill all fields.")
                         elif not is_corporate_email(clean_email): st.error(f"🚨 Only {', '.join(ALLOWED_DOMAINS)} allowed.")
@@ -798,14 +801,14 @@ if not st.session_state.logged_in:
                 with st.form("reg_step2"):
                     ent_otp = st.text_input("Enter 6-Digit OTP", max_chars=6)
                     c_v1, c_v2 = st.columns(2)
-                    if c_v1.form_submit_button("✅ Verify & Register", use_container_width=True, type="primary"):
+                    if c_v1.form_submit_button("✅ Verify & Register", width="stretch", type="primary"):
                         payload = st.session_state.reg_payload
                         if time.time() > payload.get("expires_at", 0): st.error("⏰ OTP Expired."); st.session_state.reg_step = 1
                         elif ent_otp.strip() == payload.get("otp"):
                             if create_user(payload["username"], payload["email"], payload["password"]):
                                 st.success("🎉 Account created!"); st.session_state.reg_step = 1; time.sleep(1.5); st.rerun()
                         else: st.error("❌ Incorrect OTP.")
-                    if c_v2.form_submit_button("🔄 Cancel", use_container_width=True):
+                    if c_v2.form_submit_button("🔄 Cancel", width="stretch"):
                         st.session_state.reg_step = 1; st.rerun()
     st.stop()
 
@@ -816,7 +819,7 @@ persona_mode = st.sidebar.radio(
     ["🏢 HR / Corporate Admin Hub", "👤 User (Employee) Self-Service"]
 )
 
-if st.sidebar.button("Logout", type="secondary", use_container_width=True):
+if st.sidebar.button("Logout", type="secondary", width="stretch"):
     st.session_state.logged_in = False
     st.session_state.username = ""
     st.rerun()
@@ -854,7 +857,7 @@ if persona_mode == "👤 User (Employee) Self-Service":
                 st.subheader("👨‍👩‍👧‍👦 Family Coverage & Digital Health Cards")
                 if members:
                     df_m = pd.DataFrame(members).drop(columns=['_id', 'id', 'emp_id'], errors='ignore')
-                    st.dataframe(df_m, hide_index=True, use_container_width=True)
+                    st.dataframe(df_m, hide_index=True, width="stretch")
                 
                 if cards:
                     st.markdown("#### 📥 Instant Download & Previews")
@@ -879,7 +882,7 @@ if persona_mode == "👤 User (Employee) Self-Service":
                             with st.expander(f"👁️ View {c_type} Card Preview", expanded=(c_idx==0)):
                                 pdoc = fitz.open(stream=pdf_b, filetype="pdf")
                                 for pnum in range(len(pdoc)):
-                                    st.image(pdoc[pnum].get_pixmap(dpi=150).tobytes("png"), use_container_width=True)
+                                    st.image(pdoc[pnum].get_pixmap(dpi=150).tobytes("png"), width="stretch")
                                 pdoc.close()
                 else:
                     st.warning("E-Card PDF is being generated. Please check back shortly.")
@@ -890,13 +893,13 @@ if persona_mode == "👤 User (Employee) Self-Service":
                 st.caption("Instant answers on Room Rent limits, Maternity rules, Daycare surgeries, and Claim processes.")
                 
                 col_q1, col_q2, col_q3 = st.columns(3)
-                if col_q1.button("🏥 Room Rent Limit", use_container_width=True):
+                if col_q1.button("🏥 Room Rent Limit", width="stretch"):
                     st.session_state.chat_history.append({"role": "user", "content": "What is my room rent limit?"})
                     st.session_state.chat_history.append({"role": "assistant", "content": "Under your company's Group Health Insurance with Bajaj Allianz, **Room Rent is capped at 1% of Sum Insured per day** for Normal Rooms, and **2% for ICU charges**. If you choose a higher room category, proportionate deductions will apply."})
-                if col_q2.button("🤱 Maternity Coverage", use_container_width=True):
+                if col_q2.button("🤱 Maternity Coverage", width="stretch"):
                     st.session_state.chat_history.append({"role": "user", "content": "Is maternity covered?"})
                     st.session_state.chat_history.append({"role": "assistant", "content": "Yes! Maternity is covered up to **₹50,000 for Normal Delivery** and **₹75,000 for C-Section**. The standard 9-month waiting period is waived under your corporate group policy."})
-                if col_q3.button("📋 Reimbursement Steps", use_container_width=True):
+                if col_q3.button("📋 Reimbursement Steps", width="stretch"):
                     st.session_state.chat_history.append({"role": "user", "content": "How do I file a reimbursement claim?"})
                     st.session_state.chat_history.append({"role": "assistant", "content": "To file a reimbursement claim:\n1. Collect Claim Form Part A (Employee) & Part B (Hospital).\n2. Compile original final bill, payment receipts, discharge summary, and pharmacy bills.\n3. Submit a single PDF under 10MB to claims@capitupindia.com within 30 days of discharge."})
                 
@@ -1043,7 +1046,7 @@ with tab_universal:
     with c3: opt_rename = st.checkbox("🔄 **Smart Rename with Employee Code**", value=True, help="Names output files cleanly using the Employee Code.")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    if pdf_files and st.button("🚀 Process, Split & Ingest E-Cards", type="primary", use_container_width=True):
+    if pdf_files and st.button("🚀 Process, Split & Ingest E-Cards", type="primary", width="stretch"):
         ocr_engine = load_ocr_engine()
         progress_bar = st.progress(0)
         extracted_cards = [] 
@@ -1082,8 +1085,10 @@ with tab_universal:
                     # OCR Fallback only if digital text is empty
                     if (not ext_empid or ext_empid in INVALID_EIDS or ext_empid == "UNKNOWN") and ocr_engine:
                         try:
-                            pix = page.get_pixmap(clip=rect, dpi=200)
+                            pix = page.get_pixmap(clip=rect, dpi=150)
                             img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+                            if pix.n == 4: img = img[:, :, :3]
+                            img = np.ascontiguousarray(img[:, :, ::-1])  # RGB -> BGR for PaddleOCR
                             res = ocr_engine.ocr(img, cls=False)
                             if res and res[0]:
                                 ocr_text = " \n ".join([line[1][0] for line in res[0]])
@@ -1214,7 +1219,7 @@ with tab_universal:
                 for w in unmapped_warnings: st.write(w)
                 
         if st.session_state.get('zip_data'):
-            st.download_button("📥 Download Final Output ZIP", data=st.session_state.zip_data, file_name=f"{clean_comp_preview}_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
+            st.download_button("📥 Download Final Output ZIP", data=st.session_state.zip_data, file_name=f"{clean_comp_preview}_ECards.zip", mime="application/zip", type="primary", width="stretch")
 
 # --- TAB 2: MODULAR INGESTION ---
 with tab_modular:
@@ -1223,7 +1228,7 @@ with tab_modular:
         st.subheader("🟦 Base Policy Module")
         b_excel = st.file_uploader("Upload Member List", type=["xlsx", "xls", "csv"], key="m_base_xl")
         b_pdfs = st.file_uploader("Upload Base Cards", type=["pdf"], accept_multiple_files=True, key="m_base_pdf")
-        if st.button("Ingest Base", type="primary", use_container_width=True) and b_excel and b_pdfs:
+        if st.button("Ingest Base", type="primary", width="stretch") and b_excel and b_pdfs:
             df = clean_and_align_dataframe(pd.read_csv(b_excel) if b_excel.name.endswith('.csv') else pd.read_excel(b_excel))
             cols = list(df.columns)
             emp_c = guess_column(cols, ["EMP", "ID", "HAT", "CO"])
@@ -1247,7 +1252,7 @@ with tab_modular:
         st.subheader("🟧 Top-Up Policy Module")
         t_excel = st.file_uploader("Upload Topup List", type=["xlsx", "xls", "csv"], key="m_top_xl")
         t_pdfs = st.file_uploader("Upload Topup Cards", type=["pdf"], accept_multiple_files=True, key="m_top_pdf")
-        if st.button("Ingest Topup", type="primary", use_container_width=True) and t_excel and t_pdfs:
+        if st.button("Ingest Topup", type="primary", width="stretch") and t_excel and t_pdfs:
             df = clean_and_align_dataframe(pd.read_csv(t_excel) if t_excel.name.endswith('.csv') else pd.read_excel(t_excel))
             cols = list(df.columns)
             emp_c = guess_column(cols, ["EMP", "ID", "HAT", "CO"])
@@ -1272,7 +1277,7 @@ with tab_bulk:
     st.markdown("### 📥 Bulk E-Card Retrieval")
     b_pol = st.text_input("Filter Policy (Optional):", placeholder="e.g. OG-27-1801-8403-00000112")
     b_input = st.text_area("Employee IDs (comma/space separated):")
-    if st.button("📦 Fetch & Package ZIP", type="primary", use_container_width=True) and b_input.strip():
+    if st.button("📦 Fetch & Package ZIP", type="primary", width="stretch") and b_input.strip():
         clean_ids = list(set([i.strip().upper() for i in b_input.replace(',', ' ').split() if i.strip()]))
         found = get_bulk_cards_from_db(clean_ids, policy_no=b_pol)
         if found:
@@ -1281,7 +1286,7 @@ with tab_bulk:
                 for c in found: 
                     safe_eid = re.sub(r'[\\/*?:"<>|]', '_', c['emp_id'])
                     zf.writestr(f"{c['policy_no']}_{safe_eid}_{c['card_type']}.pdf", bytes(c['pdf_data']))
-            st.download_button("📥 Download Batch ZIP", data=zbuf.getvalue(), file_name="Bulk_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
+            st.download_button("📥 Download Batch ZIP", data=zbuf.getvalue(), file_name="Bulk_ECards.zip", mime="application/zip", type="primary", width="stretch")
             st.success(f"Packaged {len(found)} cards.")
         else: st.error("No matching cards found.")
 
@@ -1293,25 +1298,25 @@ with tab_directory:
         df_all = pd.DataFrame(members).drop(columns=['_id', 'id'], errors='ignore')
         st_term = st.text_input("🔍 Search Directory:")
         if st_term: df_all = df_all[df_all['name'].str.contains(st_term, case=False, na=False) | df_all['emp_id'].str.contains(st_term, case=False, na=False)]
-        st.dataframe(df_all, hide_index=True, use_container_width=True)
+        st.dataframe(df_all, hide_index=True, width="stretch")
 
 # --- TAB 5: SEARCH INDIVIDUAL ---
 with tab_search:
     col_s1, col_s2 = st.columns([3, 1])
     s_id = col_s1.text_input("Enter Employee ID:", placeholder="e.g. 771461, CON112, ABTS2023046, or TIPL/EIN/2421")
     s_pol = st.text_input("Policy Number (Optional):")
-    if col_s2.button("🔍 Search", use_container_width=True) and s_id:
+    if col_s2.button("🔍 Search", width="stretch") and s_id:
         cards = get_cards_from_db(s_id, policy_no=s_pol)
         members = get_members_from_db(s_id)
         if cards:
             st.success(f"Found {len(cards)} card(s).")
-            if members: st.dataframe(pd.DataFrame(members).drop(columns=['_id', 'id', 'emp_id'], errors='ignore'), hide_index=True, use_container_width=True)
+            if members: st.dataframe(pd.DataFrame(members).drop(columns=['_id', 'id', 'emp_id'], errors='ignore'), hide_index=True, width="stretch")
             for c in cards:
                 pdf_b = bytes(c["pdf_data"])
                 safe_s_id = re.sub(r'[\\/*?:"<>|]', '_', s_id)
                 st.download_button(f"📥 Download {c['card_type']} ({c['policy_no']})", data=pdf_b, file_name=f"{safe_s_id}_{c['card_type']}.pdf", mime="application/pdf")
                 pdoc = fitz.open(stream=pdf_b, filetype="pdf")
-                for pnum in range(len(pdoc)): st.image(pdoc[pnum].get_pixmap(dpi=150).tobytes("png"), use_container_width=True)
+                for pnum in range(len(pdoc)): st.image(pdoc[pnum].get_pixmap(dpi=150).tobytes("png"), width="stretch")
                 pdoc.close()
         else: st.error("No card found.")
 
@@ -1380,12 +1385,12 @@ with tab_email:
         st.markdown(f"Live Form Status: **{'🟢 OPEN' if f_stat=='OPEN' else '🔴 CLOSED'}** | Active Closes: **{dline}**")
         d_opt = st.selectbox("Set Response Window:", ["1 Day (24 hrs)", "3 Days (72 hrs)", "1 Week (7 Days)", "Manual Open"], key="t6_d_opt")
         c_o1, c_o2 = st.columns(2)
-        if c_o1.button("🟢 Open Form", use_container_width=True, type="primary"):
+        if c_o1.button("🟢 Open Form", width="stretch", type="primary"):
             res = schedule_form_close(gas_url, 24.0 if "1 Day" in d_opt else 72.0)
             formatted_dl = (datetime.utcnow() + timedelta(hours=5, minutes=30, days=1 if "1 Day" in d_opt else 3)).strftime("%d-%b-%Y at %I:%M %p (IST)")
             save_deadline_to_db(active_scope_policy or "DEFAULT", formatted_dl)
             st.success("Form Opened!"); time.sleep(1); st.rerun()
-        if c_o2.button("🔴 Close Form", use_container_width=True):
+        if c_o2.button("🔴 Close Form", width="stretch"):
             set_form_status(gas_url, "close")
             save_deadline_to_db(active_scope_policy or "DEFAULT", "Form Closed"); st.warning("Form Closed!"); time.sleep(1); st.rerun()
             
@@ -1447,7 +1452,7 @@ with tab_email:
             n_col = c_e2.selectbox("Name Column", cols_m)
             rel_col = c_e2.selectbox("Relation Column (Optional)", ["None (All Primary)"] + cols_m)
             
-            if st.button("🚀 Sync Directory to Campaign", type="primary", use_container_width=True):
+            if st.button("🚀 Sync Directory to Campaign", type="primary", width="stretch"):
                 synced_c = 0
                 has_rel = rel_col != "None (All Primary)"
                 for _, r in df_m.iterrows():
@@ -1486,14 +1491,14 @@ with tab_email:
         m_c2.metric("⚠️ Missing Email (Skipped)", len(missing_jobs))
 
         if ready_jobs or missing_jobs:
-            st.dataframe(pd.DataFrame(ready_jobs + missing_jobs), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(ready_jobs + missing_jobs), hide_index=True, width="stretch")
 
         st.markdown("---")
         b_lim = st.number_input("Batch Limit", min_value=1, max_value=500, value=min(20, max(1, len(ready_jobs))), key="t6_batch_lim")
         
         c_proc, c_clear = st.columns([1.5, 1])
         with c_proc:
-            if st.button(f"▶️ Process {min(len(ready_jobs), b_lim)} Ready Jobs", type="primary", use_container_width=True, disabled=(len(ready_jobs)==0)):
+            if st.button(f"▶️ Process {min(len(ready_jobs), b_lim)} Ready Jobs", type="primary", width="stretch", disabled=(len(ready_jobs)==0)):
                 sent = 0
                 for j in ready_jobs[:b_lim]:
                     cards = get_cards_from_db(j["EMP ID"], policy_no=j["Policy"])
@@ -1520,7 +1525,7 @@ with tab_email:
                 st.success(f"Dispatched {sent} emails!"); time.sleep(1.5); st.rerun()
 
         with c_clear:
-            if st.button("🗑️ Clear Pending Queue", use_container_width=True, help="Dismisses remaining incomplete/resigned employees from queue."):
+            if st.button("🗑️ Clear Pending Queue", width="stretch", help="Dismisses remaining incomplete/resigned employees from queue."):
                 db.ecards.update_many(q_filter, {"$set": {"email_sent": True}})
                 st.warning("Pending queue cleared! Counter reset to 0.")
                 time.sleep(1); st.rerun()
@@ -1532,7 +1537,7 @@ with tab_email:
         failed_l = [l for l in logs if l["status"] == "FAILED"]
         
         if failed_l:
-            if st.button(f"🔄 Re-queue All {len(failed_l)} Failed Emails (1-Click)", type="primary", use_container_width=True, key="t6_retry_fail"):
+            if st.button(f"🔄 Re-queue All {len(failed_l)} Failed Emails (1-Click)", type="primary", width="stretch", key="t6_retry_fail"):
                 f_ids = list(set([doc["emp_id"] for doc in failed_l]))
                 db.ecards.update_many({"emp_id": {"$in": f_ids}}, {"$set": {"email_sent": False}})
                 db.email_logs.delete_many({"status": "FAILED", "campaign_type": "WELCOME_KIT"})
@@ -1543,7 +1548,7 @@ with tab_email:
                 "Time (IST)": (l["timestamp"] + timedelta(hours=5, minutes=30)).strftime("%d-%b %I:%M %p"),
                 "Emp ID": l["emp_id"], "Email": l["recipient_email"], "Status": "✅ " + l["status"] if l["status"]=="DELIVERED" else "❌ " + l["status"],
                 "Error": l.get("error_reason") or "Delivered"
-            } for l in logs]), hide_index=True, use_container_width=True)
+            } for l in logs]), hide_index=True, width="stretch")
 
 # ==============================================================================
 # --- TAB 7: 🚀 PORTAL LAUNCH & BROADCAST (DUAL HR & USER SUB-MODULES) ---
@@ -1659,7 +1664,7 @@ with tab_launch:
                 e_col_u = c_ua1.selectbox("Emp ID Column", cols_ua, key="t7_u_ecol")
                 em_col_u = c_ua1.selectbox("Email Column", cols_ua, key="t7_u_emcol")
                 n_col_u = c_ua2.selectbox("Name Column", cols_ua, key="t7_u_ncol")
-                if st.button("🚀 Sync Employee Roster", type="primary", use_container_width=True, key="btn_sync_t7_u"):
+                if st.button("🚀 Sync Employee Roster", type="primary", width="stretch", key="btn_sync_t7_u"):
                     synced_u = 0
                     for _, r in df_ua.iterrows():
                         em_val = str(r[em_col_u]).strip().lower()
@@ -1678,7 +1683,7 @@ with tab_launch:
             
             c_up1, c_up2 = st.columns([1.5, 1])
             with c_up1:
-                if st.button(f"🚀 Send {min(len(ready_u), b_lim_u)} User Invites", type="primary", use_container_width=True, disabled=(len(ready_u)==0), key="btn_send_u_launch"):
+                if st.button(f"🚀 Send {min(len(ready_u), b_lim_u)} User Invites", type="primary", width="stretch", disabled=(len(ready_u)==0), key="btn_send_u_launch"):
                     sent_u = 0
                     for u in ready_u[:b_lim_u]:
                         encoded_n = urllib.parse.quote(str(u.get("name", "Employee")).strip())
@@ -1702,7 +1707,7 @@ with tab_launch:
                     st.success(f"Broadcasted to {sent_u} employees!"); time.sleep(1.5); st.rerun()
 
             with c_up2:
-                if st.button("🗑️ Clear Queue", use_container_width=True, key="btn_clear_u_q"):
+                if st.button("🗑️ Clear Queue", width="stretch", key="btn_clear_u_q"):
                     db.directory.update_many(q_u, {"$set": {"launch_announced": True}})
                     st.warning("User queue cleared!"); time.sleep(1); st.rerun()
 
@@ -1789,7 +1794,7 @@ with tab_launch:
                 e_col_hr = c_hra1.selectbox("HR ID / Code", cols_hra, key="t7_hr_ecol")
                 em_col_hr = c_hra1.selectbox("HR Email Column", cols_hra, key="t7_hr_emcol")
                 n_col_hr = c_hra2.selectbox("HR Name Column", cols_hra, key="t7_hr_ncol")
-                if st.button("🚀 Sync HR Admin Contacts", type="primary", use_container_width=True, key="btn_sync_t7_hr"):
+                if st.button("🚀 Sync HR Admin Contacts", type="primary", width="stretch", key="btn_sync_t7_hr"):
                     synced_hr = 0
                     for _, r in df_hra.iterrows():
                         em_val = str(r[em_col_hr]).strip().lower()
@@ -1808,7 +1813,7 @@ with tab_launch:
             
             c_hrp1, c_hrp2 = st.columns([1.5, 1])
             with c_hrp1:
-                if st.button(f"🚀 Send {min(len(ready_hr), b_lim_hr)} HR Invites", type="primary", use_container_width=True, disabled=(len(ready_hr)==0), key="btn_send_hr_launch"):
+                if st.button(f"🚀 Send {min(len(ready_hr), b_lim_hr)} HR Invites", type="primary", width="stretch", disabled=(len(ready_hr)==0), key="btn_send_hr_launch"):
                     sent_hr = 0
                     for u in ready_hr[:b_lim_hr]:
                         encoded_n = urllib.parse.quote(str(u.get("name", "HR Partner")).strip())
@@ -1832,7 +1837,7 @@ with tab_launch:
                     st.success(f"Broadcasted to {sent_hr} HR leaders!"); time.sleep(1.5); st.rerun()
 
             with c_hrp2:
-                if st.button("🗑️ Clear HR Queue", use_container_width=True, key="btn_clear_hr_q"):
+                if st.button("🗑️ Clear HR Queue", width="stretch", key="btn_clear_hr_q"):
                     db.directory.update_many(q_hr, {"$set": {"launch_announced": True}})
                     st.warning("HR queue cleared!"); time.sleep(1); st.rerun()
 
@@ -1847,7 +1852,7 @@ with tab_launch:
         failed_launch_logs = [l for l in recent_launch_logs if l["status"] == "FAILED"]
         
         if failed_launch_logs:
-            if st.button(f"🔄 Re-queue All {len(failed_launch_logs)} Failed Invitations (1-Click)", type="primary", use_container_width=True, key="btn_retry_launch_failed"):
+            if st.button(f"🔄 Re-queue All {len(failed_launch_logs)} Failed Invitations (1-Click)", type="primary", width="stretch", key="btn_retry_launch_failed"):
                 failed_launch_ids = list(set([doc["emp_id"] for doc in failed_launch_logs]))
                 db.directory.update_many(
                     {"emp_id": {"$in": failed_launch_ids}},
@@ -1862,7 +1867,7 @@ with tab_launch:
                 "Time (IST)": (l["timestamp"] + timedelta(hours=5, minutes=30)).strftime("%d-%b %I:%M %p"),
                 "Emp ID": l["emp_id"], "Email": l["recipient_email"], "Status": "✅ " + l["status"] if l["status"]=="DELIVERED" else "❌ " + l["status"],
                 "Campaign": l.get("campaign_type", "LAUNCH"), "Error": l.get("error_reason") or "Delivered"
-            } for l in recent_launch_logs]), hide_index=True, use_container_width=True)
+            } for l in recent_launch_logs]), hide_index=True, width="stretch")
             
             if st.button("🗑️ Clear Launch Campaign History", key="btn_clear_launch_logs"):
                 db.email_logs.delete_many(l_logs_q)
@@ -1872,7 +1877,7 @@ with tab_launch:
             st.info("No launch dispatch history recorded yet.")
 
         with st.expander("🛠️ Re-Queue & Reset Launch Campaign", expanded=False):
-            if st.button("🚨 Reset All Users in Scope (Allow Re-Broadcasting)", type="secondary", use_container_width=True, key="btn_reset_launch_all"):
+            if st.button("🚨 Reset All Users in Scope (Allow Re-Broadcasting)", type="secondary", width="stretch", key="btn_reset_launch_all"):
                 db.directory.update_many(q_l, {"$set": {"launch_announced": False}})
                 st.success("All users in scope re-queued for launch announcement!")
                 time.sleep(1); st.rerun()
@@ -1908,7 +1913,7 @@ with tab_family:
         
         f_pdfs = st.file_uploader("2. Upload Individual E-Card PDFs to Merge", type=["pdf"], accept_multiple_files=True, key="fam_pdfs")
         
-        if f_pdfs and st.button("🧬 Consolidate Families (ZIP only)", type="primary", use_container_width=True):
+        if f_pdfs and st.button("🧬 Consolidate Families (ZIP only)", type="primary", width="stretch"):
             df_clean = df_f.dropna(subset=[ucol, ecol])
             u_to_e = {}
             for _, r in df_clean.iterrows():
@@ -1963,7 +1968,7 @@ with tab_family:
             m1.metric("Families Consolidated", len(fgroups))
             m3.metric("Unmatched Cards", len(unmatched))
             
-            st.download_button("📥 Download Family Packets (.zip)", data=zbuf.getvalue(), file_name="Family_ECards.zip", mime="application/zip", type="primary", use_container_width=True)
+            st.download_button("📥 Download Family Packets (.zip)", data=zbuf.getvalue(), file_name="Family_ECards.zip", mime="application/zip", type="primary", width="stretch")
 
 # --- TAB 9: GAP FINDER ---
 with tab_gap:
@@ -1974,7 +1979,7 @@ with tab_gap:
     if g_xl and g_zp:
         df_g = clean_and_align_dataframe(pd.read_csv(g_xl) if g_xl.name.endswith('.csv') else pd.read_excel(g_xl))
         g_ecol = st.selectbox("Primary Emp ID Column", df_g.columns, key="gap_ecol")
-        if st.button("🔍 Run Analyzer", type="primary", use_container_width=True):
+        if st.button("🔍 Run Analyzer", type="primary", width="stretch"):
             with zipfile.ZipFile(g_zp) as z:
                 znames = [re.sub(r'(\.PDF|_ECARD|_CARD|_FAMILY).*$', '', os.path.basename(f.filename).upper()).strip() for f in z.infolist() if not f.is_dir()]
             matched = df_g[df_g[g_ecol].astype(str).str.strip().str.upper().isin(znames)]
@@ -1987,5 +1992,5 @@ with tab_gap:
                 st.warning(f"Missing {len(missing)} members.")
                 out = BytesIO()
                 with pd.ExcelWriter(out, engine='openpyxl') as w: missing.to_excel(w, index=False)
-                st.download_button("📥 Download Missing Report (.xlsx)", data=out.getvalue(), file_name="Missing_ECards.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
+                st.download_button("📥 Download Missing Report (.xlsx)", data=out.getvalue(), file_name="Missing_ECards.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", width="stretch")
             else: st.success("All members matched!")
