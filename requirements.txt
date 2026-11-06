@@ -1,9 +1,9 @@
-streamlit>=1.30.0
+streamlit>=1.50.0
 PyMuPDF>=1.23.0
 opencv-python-headless>=4.8.0
 numpy>=1.24.0,<2.0.0
 pandas>=2.0.0
-paddlepaddle>=2.5.0
+paddlepaddle==2.6.2  # paddleocr 2.7.x is NOT compatible with paddlepaddle 3.x (hard crash)
 paddleocr==2.7.3
 pymongo>=4.6.0
 dnspython>=2.4.0
