@@ -74,6 +74,8 @@ except Exception:
             relationship=first_m.relationship if first_m else "SELF"
         )
 
+from launch_center import render_launch_center, render_feedback_widget
+
 DEFAULT_GAS_URL = "https://script.google.com/macros/s/AKfycbwexxFRlk43f3-SP6fH5VsgSeGpf-cDQXkETNlUT8OJ06AlOGirJ39ivP44HszMMNpAFg/exec"
 ALLOWED_DOMAINS = ["capitupindia.com", "capitup.com"]
 
@@ -824,6 +826,11 @@ if st.sidebar.button("Logout", type="secondary", width="stretch"):
     st.session_state.username = ""
     st.rerun()
 
+with st.sidebar:
+    st.markdown("---")
+    render_feedback_widget(get_db(), st.session_state.username,
+                           "EMPLOYEE" if "Employee" in persona_mode else "HR_ADMIN", key="fb_sidebar")
+
 db = get_db()
 
 # ==============================================================================
@@ -1551,336 +1558,15 @@ with tab_email:
             } for l in logs]), hide_index=True, width="stretch")
 
 # ==============================================================================
-# --- TAB 7: 🚀 PORTAL LAUNCH & BROADCAST (DUAL HR & USER SUB-MODULES) ---
+# --- TAB 7: 🚀 PORTAL LAUNCH & FEEDBACK CENTER (see launch_center.py) ---
 # ==============================================================================
 with tab_launch:
-    st.markdown("### 🚀 Portal Launch & Feedback Broadcast Center")
-    st.markdown("Broadcast the launch of the **CapitUp Benefits Portal (Beta)** to **Tenant HR Leaders** or **Employees** with customized messaging.")
-    
-    live_tenants_map = get_live_tenants_and_policies()
-    discovered_comp_list = sorted(list(live_tenants_map.keys()))
-    
-    col_lt1, col_lt2 = st.columns(2)
-    with col_lt1:
-        camp_launch_opts = ["🌐 All Corporate Clients"] + discovered_comp_list + ["➕ Custom Company Name"]
-        sel_l_comp = st.selectbox("Select Target Client Company:", camp_launch_opts, key="t7_launch_comp")
-        if sel_l_comp == "➕ Custom Company Name":
-            t7_custom_comp = st.text_input("Company Name Override:", placeholder="e.g. STRATEGIC SYSTEMS", key="t7_comp_man")
-        else:
-            t7_custom_comp = st.text_input("Company Name Override (Optional):", value=sel_l_comp if sel_l_comp != "🌐 All Corporate Clients" else "", key="t7_comp_auto")
-
-    with col_lt2:
-        avail_l_pols = live_tenants_map.get(sel_l_comp, []) if sel_l_comp in live_tenants_map else []
-        all_dir_pols = db.directory.distinct("policy_no")
-        combined_l_pols = sorted(list(set(avail_l_pols + all_dir_pols)))
-        l_pol_opts = ["🌐 All Policies"] + combined_l_pols + ["➕ Custom Policy Number"]
-        sel_l_pol = st.selectbox("Select Target Policy Scope:", l_pol_opts, key="t7_launch_pol")
-        if sel_l_pol == "➕ Custom Policy Number":
-            t7_custom_pol = st.text_input("Policy Number Override:", placeholder="e.g. OG-27-1801-8403-00000112", key="t7_pol_man")
-        else:
-            t7_custom_pol = st.text_input("Policy Number Override (Optional):", value=sel_l_pol if sel_l_pol != "🌐 All Policies" else "", key="t7_pol_auto")
-
-    active_launch_comp = t7_custom_comp.strip().upper() if t7_custom_comp else (sel_l_comp if sel_l_comp != "🌐 All Corporate Clients" else "Your Company")
-    active_launch_pol = t7_custom_pol.strip().upper() if t7_custom_pol else (sel_l_pol if sel_l_pol != "🌐 All Policies" else None)
-
-    st.divider()
-    subtab_user_launch, subtab_hr_launch = st.tabs(["👤 Employee (User) Launch Broadcast", "🏢 Tenant HR Admin Broadcast"])
-
-    # SUB-TAB 1: USER LAUNCH BROADCAST
-    with subtab_user_launch:
-        col_u_left, col_u_right = st.columns([1.2, 1])
-        with col_u_left:
-            st.subheader("⚙️ User Launch Assets & Links")
-            c_ug1, c_ug2 = st.columns(2)
-            with c_ug1:
-                if get_asset("user_portal_guide"):
-                    st.success("User Guide Active")
-                    if st.button("Delete User Guide", key="d_upg"): delete_asset("user_portal_guide"); st.rerun()
-                else:
-                    up_ug = st.file_uploader("Upload User Guide PDF", type=["pdf"], key="up_upg")
-                    if up_ug: save_asset("user_portal_guide", up_ug.getvalue()); st.rerun()
-            with c_ug2:
-                if get_asset("user_launch_banner"):
-                    st.success("User Banner Active")
-                    if st.button("Delete User Banner", key="d_upb"): delete_asset("user_launch_banner"); st.rerun()
-                else:
-                    up_ub = st.file_uploader("Upload User Banner Image", type=["png", "jpg"], key="up_upb")
-                    if up_ub: save_asset("user_launch_banner", up_ub.getvalue()); st.rerun()
-                    
-            p_url_u = st.text_input("User Portal URL:", value="https://portal.capitupindia.com", key="t7_u_purl")
-            fb_url_base_u = "https://docs.google.com/forms/d/e/1FAIpQLSdpJ-_GbT1AGeD1tIVEMbvF0DtNexO7fz_0nJE1mdKBu6rrag/viewform?usp=pp_url"
-            fb_url_u = st.text_input("User Feedback Form Base URL:", value=fb_url_base_u, key="t7_u_fburl")
-            l_subj_u = st.text_input("User Subject Line:", value="🚀 Welcome to the All-New CapitUp Benefits Portal (Beta)!", key="t7_u_subj")
-            
-            logo_tag_u = """<div style="text-align: center; margin-bottom: 15px;"><img src="cid:logo_image" alt="CapitUp India Logo" style="height: 60px; width: auto; display: inline-block;" /></div>""" if get_asset("logo") else ""
-            
-            user_launch_html = f"""<div style="font-family: 'Segoe UI', Arial, sans-serif; color: #333; line-height: 1.6; max-width: 650px; margin: 0 auto; border: 1px solid #C29B38; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.05); background-color: #ffffff;">
-  <div style="background-color: #0B1E30; padding: 30px 24px; text-align: center; border-bottom: 3px solid #C29B38;">
-    {logo_tag_u}
-    <h1 style="color: #ffffff; margin: 0; font-size: 22px; letter-spacing: 1px; font-weight: 800; text-transform: uppercase;">WELCOME TO NEXT-GEN HEALTHCARE ACCESS</h1>
-    <p style="color: #C29B38; margin: 6px 0 0 0; font-size: 11px; font-weight: bold; letter-spacing: 2px;">CAPITUP EMPLOYEE BENEFITS PORTAL (BETA)</p>
-  </div>
-  <!-- BANNER -->
-  <div style="padding: 32px 24px;">
-    <p style="font-size: 15px; margin-top: 0;">Dear <strong>{{{{name}}}}</strong>,</p>
-    <p style="font-size: 14px; color: #444;">We are thrilled to unveil the <strong>CapitUp Employee Health & Benefits Portal (Beta)</strong>—crafted specifically for you and your family at <strong>{{{{company_name}}}}</strong>!</p>
-    <div style="background-color: #F4F6F8; border-left: 4px solid #23C2A9; padding: 18px; margin: 24px 0; border-radius: 6px;">
-      <h3 style="margin-top: 0; color: #0B1E30; font-size: 14px; text-transform: uppercase;">✨ Your Digital Health & Benefits Hub</h3>
-      <ul style="font-size: 13px; padding-left: 20px; margin: 8px 0; color: #444; line-height: 1.6;">
-        <li><strong>⚡ Instant E-Card Wallet:</strong> View & download unified family health cards in seconds.</li>
-        <li><strong>🤖 24/7 AI Policy Copilot:</strong> Ask instant questions about room rent limits, maternity rules, and claim steps.</li>
-        <li><strong>👨‍👩‍👧‍👦 Family Coverage View:</strong> Review covered dependents and Sum Insured limits with total transparency.</li>
-      </ul>
-    </div>
-    <div style="text-align: center; margin: 30px 0;">
-      <a href="{{{{portal_url}}}}" style="background-color: #0B1E30; color: #ffffff; padding: 15px 36px; text-decoration: none; font-size: 14px; font-weight: bold; border-radius: 6px; display: inline-block; border: 2px solid #C29B38;">🌐 Explore the CapitUp Portal</a>
-    </div>
-    <div style="border: 1px solid #C29B38; background-color: #FCF9F2; border-radius: 8px; padding: 20px; margin: 28px 0;">
-      <h3 style="margin-top: 0; color: #0B1E30; font-size: 14px;">🌟 Shape Your Corporate Benefits Experience (Your Beta Feedback Matters!)</h3>
-      <p style="font-size: 13px; margin: 8px 0; color: #444;">Did you find your cards easily? Tell us what features you would love to see next!</p>
-      <div style="text-align: center; margin-top: 14px;">
-        <a href="{{{{feedback_url}}}}" style="background-color: #23C2A9; color: #ffffff; padding: 12px 26px; text-decoration: none; font-size: 13px; font-weight: bold; border-radius: 6px; display: inline-block;">📝 Share Your Thoughts & Feedback</a>
-      </div>
-    </div>
-  </div>
-  <div style="background-color: #F4F6F8; padding: 24px; text-align: center; border-top: 1px solid #e5e7eb;">
-    <p style="margin: 0; font-size: 12px; color: #0B1E30; font-weight: bold;">CapitUp India Pvt. Ltd. | HITEC City, Hyderabad</p>
-  </div>
-</div>"""
-            u_html = st.text_area("USER EMAIL HTML", value=user_launch_html, height=180, key="t7_u_html")
-            
-            if st.checkbox("👁️ Preview User Email", key="prev_t7_u"):
-                dummy_fb = f"{fb_url_u}&entry.1752786264=MOCK101&entry.1314062294=Employee&entry.2060790789={urllib.parse.quote(active_launch_comp)}"
-                rendered_u = u_html.replace("{{name}}", st.session_state.username).replace("{{emp_id}}", "MOCK-101").replace("{{company_name}}", active_launch_comp).replace("{{portal_url}}", p_url_u).replace("{{feedback_url}}", dummy_fb)
-                st.components.v1.html(rendered_u, height=450, scrolling=True)
-
-        with col_u_right:
-            st.subheader("📢 User Audience & Dispatch")
-            up_u_active = st.file_uploader("Upload Active Employee List (CSV/Excel)", type=["csv", "xlsx"], key="t7_u_active_up")
-            if up_u_active:
-                df_ua = clean_and_align_dataframe(pd.read_csv(up_u_active) if up_u_active.name.endswith('.csv') else pd.read_excel(up_u_active))
-                cols_ua = list(df_ua.columns)
-                c_ua1, c_ua2 = st.columns(2)
-                e_col_u = c_ua1.selectbox("Emp ID Column", cols_ua, key="t7_u_ecol")
-                em_col_u = c_ua1.selectbox("Email Column", cols_ua, key="t7_u_emcol")
-                n_col_u = c_ua2.selectbox("Name Column", cols_ua, key="t7_u_ncol")
-                if st.button("🚀 Sync Employee Roster", type="primary", width="stretch", key="btn_sync_t7_u"):
-                    synced_u = 0
-                    for _, r in df_ua.iterrows():
-                        em_val = str(r[em_col_u]).strip().lower()
-                        if em_val in ["nan", "none", "null", "undefined"]: em_val = ""
-                        save_employee_to_directory(str(r[e_col_u]).strip().upper(), str(r[n_col_u]).strip(), em_val, active_launch_pol or "DEFAULT", active_launch_comp, role="EMPLOYEE")
-                        synced_u += 1
-                    st.success(f"Synced {synced_u} active employees!"); time.sleep(1); st.rerun()
-
-            q_u = {"role": "EMPLOYEE"}
-            if active_launch_pol: q_u["policy_no"] = active_launch_pol
-            users_u = list(db.directory.find(q_u))
-            ready_u = [u for u in users_u if not u.get("launch_announced") and u.get("email") and "@" in u.get("email")]
-            st.metric("🟢 Ready to Invite (Employees)", len(ready_u))
-
-            b_lim_u = st.number_input("Batch Limit", min_value=1, max_value=500, value=min(20, max(1, len(ready_u))), key="t7_u_blim")
-            
-            c_up1, c_up2 = st.columns([1.5, 1])
-            with c_up1:
-                if st.button(f"🚀 Send {min(len(ready_u), b_lim_u)} User Invites", type="primary", width="stretch", disabled=(len(ready_u)==0), key="btn_send_u_launch"):
-                    sent_u = 0
-                    for u in ready_u[:b_lim_u]:
-                        encoded_n = urllib.parse.quote(str(u.get("name", "Employee")).strip())
-                        encoded_eid = urllib.parse.quote(str(u["emp_id"]).strip())
-                        encoded_c = urllib.parse.quote(str(active_launch_comp).strip())
-                        dynamic_fb_link = f"{fb_url_u}&entry.1752786264={encoded_eid}&entry.1314062294={encoded_n}&entry.2060790789={encoded_c}"
-                        
-                        body = u_html.replace("{{name}}", u.get("name", "Employee"))\
-                                     .replace("{{emp_id}}", u["emp_id"])\
-                                     .replace("{{company_name}}", active_launch_comp)\
-                                     .replace("{{portal_url}}", p_url_u)\
-                                     .replace("{{feedback_url}}", dynamic_fb_link)
-                                     
-                        ok, err = send_launch_email(u["email"], l_subj_u, body, guide_asset_key="user_portal_guide", banner_asset_key="user_launch_banner")
-                        if ok:
-                            db.directory.update_one({"_id": u["_id"]}, {"$set": {"launch_announced": True}})
-                            log_email_dispatch(u["emp_id"], u.get("name", "Employee"), u["email"], u.get("policy_no", "UNKNOWN"), "DELIVERED", campaign_type="USER_PORTAL_LAUNCH")
-                            sent_u += 1
-                        else:
-                            log_email_dispatch(u["emp_id"], u.get("name", "Employee"), u["email"], u.get("policy_no", "UNKNOWN"), "FAILED", err, campaign_type="USER_PORTAL_LAUNCH")
-                    st.success(f"Broadcasted to {sent_u} employees!"); time.sleep(1.5); st.rerun()
-
-            with c_up2:
-                if st.button("🗑️ Clear Queue", width="stretch", key="btn_clear_u_q"):
-                    db.directory.update_many(q_u, {"$set": {"launch_announced": True}})
-                    st.warning("User queue cleared!"); time.sleep(1); st.rerun()
-
-    # SUB-TAB 2: TENANT HR ADMIN BROADCAST
-    with subtab_hr_launch:
-        col_hr_left, col_hr_right = st.columns([1.2, 1])
-        with col_hr_left:
-            st.subheader("⚙️ HR Admin Launch Assets & Endpoints")
-            c_hrg1, c_hrg2 = st.columns(2)
-            with c_hrg1:
-                if get_asset("hr_portal_guide"):
-                    st.success("HR Guide Active")
-                    if st.button("Delete HR Guide", key="d_hrpg"): delete_asset("hr_portal_guide"); st.rerun()
-                else:
-                    up_hrg = st.file_uploader("Upload HR Admin Guide PDF", type=["pdf"], key="up_hrpg")
-                    if up_hrg: save_asset("hr_portal_guide", up_hrg.getvalue()); st.rerun()
-            with c_hrg2:
-                if get_asset("hr_launch_banner"):
-                    st.success("HR Banner Active")
-                    if st.button("Delete HR Banner", key="d_hrpb"): delete_asset("hr_launch_banner"); st.rerun()
-                else:
-                    up_hrb = st.file_uploader("Upload HR Banner Image", type=["png", "jpg"], key="up_hrpb")
-                    if up_hrb: save_asset("hr_launch_banner", up_hrb.getvalue()); st.rerun()
-                    
-            p_url_hr = st.text_input("HR Admin Portal URL:", value="https://admin.capitupindia.com", key="t7_hr_purl")
-            fb_url_base_hr = "https://docs.google.com/forms/d/e/1FAIpQLSdpJ-_GbT1AGeD1tIVEMbvF0DtNexO7fz_0nJE1mdKBu6rrag/viewform?usp=pp_url"
-            fb_url_hr = st.text_input("HR Feedback Form Base URL:", value=fb_url_base_hr, key="t7_hr_fburl")
-            l_subj_hr = st.text_input("HR Subject Line:", value="🏢 Introducing Your CapitUp Corporate Benefits Management Workspace", key="t7_hr_subj")
-            
-            logo_tag_hr = """<div style="text-align: center; margin-bottom: 15px;"><img src="cid:logo_image" alt="CapitUp India Logo" style="height: 60px; width: auto; display: inline-block;" /></div>""" if get_asset("logo") else ""
-            
-            hr_launch_html = f"""<div style="font-family: 'Segoe UI', Arial, sans-serif; color: #333; line-height: 1.6; max-width: 650px; margin: 0 auto; border: 1px solid #C29B38; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.05); background-color: #ffffff;">
-  <div style="background-color: #0B1E30; padding: 30px 24px; text-align: center; border-bottom: 3px solid #C29B38;">
-    {logo_tag_hr}
-    <h1 style="color: #ffffff; margin: 0; font-size: 22px; letter-spacing: 1px; font-weight: 800; text-transform: uppercase;">WELCOME TO YOUR HR BENEFITS WORKSPACE</h1>
-    <p style="color: #C29B38; margin: 6px 0 0 0; font-size: 11px; font-weight: bold; letter-spacing: 2px;">POWERED BY CAPITUP CORPORATE INSURTECH</p>
-  </div>
-  <!-- BANNER -->
-  <div style="padding: 32px 24px;">
-    <p style="font-size: 15px; margin-top: 0;">Dear <strong>{{{{name}}}}</strong> (HR / People Ops Team),</p>
-    <p style="font-size: 14px; color: #444;">We are pleased to introduce the all-new <strong>CapitUp Tenant HR Administration Suite (Beta)</strong> for <strong>{{{{company_name}}}}</strong>.</p>
-    <div style="background-color: #F4F6F8; border-left: 4px solid #0B1E30; padding: 18px; margin: 24px 0; border-radius: 6px;">
-      <h3 style="margin-top: 0; color: #0B1E30; font-size: 14px; text-transform: uppercase;">⚡ Enterprise Capabilities at Your Fingertips</h3>
-      <ul style="font-size: 13px; padding-left: 20px; margin: 8px 0; color: #444; line-height: 1.6;">
-        <li><strong>📊 Executive Overview:</strong> Real-time tenant analytics, coverage summaries, and live health metrics.</li>
-        <li><strong>👥 Employee Directory & DPDP:</strong> Total control over active employee rosters and data privacy compliance.</li>
-        <li><strong>🔄 Endorsement Engine:</strong> Automated addition/deletion sync with instant pro-rata premium raters.</li>
-        <li><strong>📈 Claims Analytics & MIS Dumps:</strong> Download raw claim MIS sheets and CMO-level AI risk insights.</li>
-        <li><strong>❓ Live Request Queue:</strong> Track employee support tickets and endorsement status in real-time.</li>
-      </ul>
-    </div>
-    <div style="text-align: center; margin: 30px 0;">
-      <a href="{{{{portal_url}}}}" style="background-color: #0B1E30; color: #ffffff; padding: 15px 36px; text-decoration: none; font-size: 14px; font-weight: bold; border-radius: 6px; display: inline-block; border: 2px solid #C29B38;">🏢 Access Your HR Hub</a>
-    </div>
-    <div style="border: 1px solid #C29B38; background-color: #FCF9F2; border-radius: 8px; padding: 20px; margin: 28px 0;">
-      <h3 style="margin-top: 0; color: #0B1E30; font-size: 14px;">🌟 Shape Your Corporate Benefits Experience (HR Beta Feedback)</h3>
-      <p style="font-size: 13px; margin: 8px 0; color: #444;">As our trusted HR partner, your perspective is crucial. Tell us how we can make your benefits management even simpler.</p>
-      <div style="text-align: center; margin-top: 14px;">
-        <a href="{{{{feedback_url}}}}" style="background-color: #23C2A9; color: #ffffff; padding: 12px 26px; text-decoration: none; font-size: 13px; font-weight: bold; border-radius: 6px; display: inline-block;">📝 Share HR Executive Feedback</a>
-      </div>
-    </div>
-  </div>
-  <div style="background-color: #F4F6F8; padding: 24px; text-align: center; border-top: 1px solid #e5e7eb;">
-    <p style="margin: 0; font-size: 12px; color: #0B1E30; font-weight: bold;">CapitUp Corporate Enterprise Support | Dedicated Partner Desk</p>
-  </div>
-</div>"""
-            hr_html = st.text_area("HR EMAIL HTML", value=hr_launch_html, height=180, key="t7_hr_html")
-            
-            if st.checkbox("👁️ Preview HR Email", key="prev_t7_hr"):
-                dummy_fb_hr = f"{fb_url_hr}&entry.1752786264=HR101&entry.1314062294=HR%20Partner&entry.2060790789={urllib.parse.quote(active_launch_comp)}"
-                rendered_hr = hr_html.replace("{{name}}", st.session_state.username)\
-                                     .replace("{{company_name}}", active_launch_comp)\
-                                     .replace("{{portal_url}}", p_url_hr)\
-                                     .replace("{{feedback_url}}", dummy_fb_hr)
-                st.components.v1.html(rendered_hr, height=450, scrolling=True)
-
-        with col_hr_right:
-            st.subheader("📢 HR Admin Audience & Dispatch")
-            up_hr_active = st.file_uploader("Upload HR Team Contacts (CSV/Excel)", type=["csv", "xlsx"], key="t7_hr_active_up")
-            if up_hr_active:
-                df_hra = clean_and_align_dataframe(pd.read_csv(up_hr_active) if up_hr_active.name.endswith('.csv') else pd.read_excel(up_hr_active))
-                cols_hra = list(df_hra.columns)
-                c_hra1, c_hra2 = st.columns(2)
-                e_col_hr = c_hra1.selectbox("HR ID / Code", cols_hra, key="t7_hr_ecol")
-                em_col_hr = c_hra1.selectbox("HR Email Column", cols_hra, key="t7_hr_emcol")
-                n_col_hr = c_hra2.selectbox("HR Name Column", cols_hra, key="t7_hr_ncol")
-                if st.button("🚀 Sync HR Admin Contacts", type="primary", width="stretch", key="btn_sync_t7_hr"):
-                    synced_hr = 0
-                    for _, r in df_hra.iterrows():
-                        em_val = str(r[em_col_hr]).strip().lower()
-                        if em_val in ["nan", "none", "null", "undefined"]: em_val = ""
-                        save_employee_to_directory(str(r[e_col_hr]).strip().upper(), str(r[n_col_hr]).strip(), em_val, active_launch_pol or "DEFAULT", active_launch_comp, role="HR_ADMIN")
-                        synced_hr += 1
-                    st.success(f"Synced {synced_hr} HR contacts!"); time.sleep(1); st.rerun()
-
-            q_hr = {"role": "HR_ADMIN"}
-            if active_launch_pol: q_hr["policy_no"] = active_launch_pol
-            users_hr = list(db.directory.find(q_hr))
-            ready_hr = [u for u in users_hr if not u.get("launch_announced") and u.get("email") and "@" in u.get("email")]
-            st.metric("🟢 Ready to Invite (HR Admins)", len(ready_hr))
-
-            b_lim_hr = st.number_input("Batch Limit", min_value=1, max_value=100, value=min(20, max(1, len(ready_hr))), key="t7_hr_blim")
-            
-            c_hrp1, c_hrp2 = st.columns([1.5, 1])
-            with c_hrp1:
-                if st.button(f"🚀 Send {min(len(ready_hr), b_lim_hr)} HR Invites", type="primary", width="stretch", disabled=(len(ready_hr)==0), key="btn_send_hr_launch"):
-                    sent_hr = 0
-                    for u in ready_hr[:b_lim_hr]:
-                        encoded_n = urllib.parse.quote(str(u.get("name", "HR Partner")).strip())
-                        encoded_eid = urllib.parse.quote(str(u.get("emp_id", "HR")).strip())
-                        encoded_c = urllib.parse.quote(str(active_launch_comp).strip())
-                        dynamic_fb_link_hr = f"{fb_url_hr}&entry.1752786264={encoded_eid}&entry.1314062294={encoded_n}&entry.2060790789={encoded_c}"
-                        
-                        body = hr_html.replace("{{name}}", u.get("name", "HR Partner"))\
-                                       .replace("{{emp_id}}", u.get("emp_id", "HR"))\
-                                       .replace("{{company_name}}", active_launch_comp)\
-                                       .replace("{{portal_url}}", p_url_hr)\
-                                       .replace("{{feedback_url}}", dynamic_fb_link_hr)
-                                       
-                        ok, err = send_launch_email(u["email"], l_subj_hr, body, guide_asset_key="hr_portal_guide", banner_asset_key="hr_launch_banner")
-                        if ok:
-                            db.directory.update_one({"_id": u["_id"]}, {"$set": {"launch_announced": True}})
-                            log_email_dispatch(u["emp_id"], u.get("name", "HR Partner"), u["email"], u.get("policy_no", "UNKNOWN"), "DELIVERED", campaign_type="HR_PORTAL_LAUNCH")
-                            sent_hr += 1
-                        else:
-                            log_email_dispatch(u["emp_id"], u.get("name", "HR Partner"), u["email"], u.get("policy_no", "UNKNOWN"), "FAILED", err, campaign_type="HR_PORTAL_LAUNCH")
-                    st.success(f"Broadcasted to {sent_hr} HR leaders!"); time.sleep(1.5); st.rerun()
-
-            with c_hrp2:
-                if st.button("🗑️ Clear HR Queue", width="stretch", key="btn_clear_hr_q"):
-                    db.directory.update_many(q_hr, {"$set": {"launch_announced": True}})
-                    st.warning("HR queue cleared!"); time.sleep(1); st.rerun()
-
-        # 7-Day History and 1-Click Retry
-        st.markdown("---")
-        st.markdown("##### 📊 7-Day Launch Campaign Audit & Retry Hub")
-        
-        l_logs_q = {"campaign_type": {"$in": ["USER_PORTAL_LAUNCH", "HR_PORTAL_LAUNCH"]}}
-        if active_launch_pol: l_logs_q["policy_no"] = active_launch_pol
-        
-        recent_launch_logs = list(db.email_logs.find(l_logs_q).sort("timestamp", -1).limit(50))
-        failed_launch_logs = [l for l in recent_launch_logs if l["status"] == "FAILED"]
-        
-        if failed_launch_logs:
-            if st.button(f"🔄 Re-queue All {len(failed_launch_logs)} Failed Invitations (1-Click)", type="primary", width="stretch", key="btn_retry_launch_failed"):
-                failed_launch_ids = list(set([doc["emp_id"] for doc in failed_launch_logs]))
-                db.directory.update_many(
-                    {"emp_id": {"$in": failed_launch_ids}},
-                    {"$set": {"launch_announced": False}}
-                )
-                db.email_logs.delete_many({"campaign_type": {"$in": ["USER_PORTAL_LAUNCH", "HR_PORTAL_LAUNCH"]}, "status": "FAILED"})
-                st.success(f"✅ Re-queued {len(failed_launch_ids)} failed users for launch invitation!")
-                time.sleep(1.5); st.rerun()
-
-        if recent_launch_logs:
-            st.dataframe(pd.DataFrame([{
-                "Time (IST)": (l["timestamp"] + timedelta(hours=5, minutes=30)).strftime("%d-%b %I:%M %p"),
-                "Emp ID": l["emp_id"], "Email": l["recipient_email"], "Status": "✅ " + l["status"] if l["status"]=="DELIVERED" else "❌ " + l["status"],
-                "Campaign": l.get("campaign_type", "LAUNCH"), "Error": l.get("error_reason") or "Delivered"
-            } for l in recent_launch_logs]), hide_index=True, width="stretch")
-            
-            if st.button("🗑️ Clear Launch Campaign History", key="btn_clear_launch_logs"):
-                db.email_logs.delete_many(l_logs_q)
-                st.success("Launch history cleared!")
-                time.sleep(1); st.rerun()
-        else:
-            st.info("No launch dispatch history recorded yet.")
-
-        with st.expander("🛠️ Re-Queue & Reset Launch Campaign", expanded=False):
-            if st.button("🚨 Reset All Users in Scope (Allow Re-Broadcasting)", type="secondary", width="stretch", key="btn_reset_launch_all"):
-                db.directory.update_many(q_l, {"$set": {"launch_announced": False}})
-                st.success("All users in scope re-queued for launch announcement!")
-                time.sleep(1); st.rerun()
+    render_launch_center(db, {
+        "get_asset": get_asset, "save_asset": save_asset, "delete_asset": delete_asset,
+        "log_email_dispatch": log_email_dispatch,
+        "clean_and_align_dataframe": clean_and_align_dataframe,
+        "get_live_tenants_and_policies": get_live_tenants_and_policies,
+    })
 
 # --- TAB 8: STANDALONE FAST FAMILYFICATION ---
 with tab_family:

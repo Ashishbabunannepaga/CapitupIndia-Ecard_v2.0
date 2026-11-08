@@ -2,6 +2,7 @@ streamlit>=1.50.0
 PyMuPDF>=1.23.0
 opencv-python-headless>=4.8.0
 numpy>=1.24.0,<2.0.0
+pyarrow>=14,<26  # pyarrow 26+ needs NumPy 2, but paddle needs NumPy 1.x (breaks every table in the app)
 pandas>=2.0.0
 paddlepaddle==2.6.2  # paddleocr 2.7.x is NOT compatible with paddlepaddle 3.x (hard crash)
 paddleocr==2.7.3
