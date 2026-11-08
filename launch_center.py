@@ -33,26 +33,35 @@ ASSET_DIR = os.path.join(APP_DIR, "launch_assets")
 BUNDLED = {
     "logo": "capitup_logo.png",
     "diwali_card": "diwali_greeting_card.jpg",
-    "hr_portal_guide": "CapitUp_HR_Portal_Setup_Guide.pdf",
+    "hr_portal_guide": "dhAIrya_HR_Setup_Guide.pdf",
     "video_thumb": "launch_video_thumbnail.jpg",
 }
 
 CAMPAIGN_HR = "HR_PORTAL_LAUNCH"
 CAMPAIGN_USER = "USER_PORTAL_LAUNCH"
-TEMPLATE_VERSION = "2026-11-diwali-v1"
+TEMPLATE_VERSION = "2026-11-dhairya-v2"
 
 DEFAULT_CONFIG = {
-    "portal_name": "Dhairya",
-    "portal_tagline": "the CapitUp Benefits Portal",
-    "hr_portal_url": "https://admin.capitupindia.com",
-    "user_portal_url": "https://portal.capitupindia.com",
+    "portal_name": "dhAIrya",
+    "portal_tagline": "CapitUp India's group health benefits portal",
+    "hr_portal_url": "https://portal.capitupindia.com/portal-login",
+    "user_portal_url": "https://portal.capitupindia.com/",
     "feedback_form_url": "https://docs.google.com/forms/d/e/1FAIpQLSdpJ-_GbT1AGeD1tIVEMbvF0DtNexO7fz_0nJE1mdKBu6rrag/viewform?usp=pp_url",
-    "data_cutoff": "16-Sep-2026",
-    "support_email": "support@capitupindia.com",
+    # Fallback when a company has no line in company_data_dates.
+    "data_cutoff": "see Recent batches in the portal",
+    # One "Company name = date" per line: date of the latest endorsement file we hold.
+    "company_data_dates": "\n".join([
+        "ZoomRx = 06 Nov 2026", "Alphamed = 04 Nov 2026", "RandomTrees = 04 Nov 2026",
+        "Graviti = 30 Oct 2026", "Technogen = 29 Oct 2026", "Polmor = 28 Oct 2026",
+        "ASA Bhanu = 23 Oct 2026", "Kloudgin = 21 Oct 2026", "Intellativ = 14 Oct 2026",
+        "Stratsol = 05 Oct 2026", "Purview = 28 Sep 2026", "Ecoled = 17 Sep 2026",
+        "Siemon = 15 Sep 2026", "Biochemical = 14 Aug 2026", "Intonation = 13 Aug 2026",
+    ]),
+    "support_email": "info@capitupindia.com",
     "video_url": "",
     "festive_greeting": True,
-    "hr_subject": "\U0001fa94 Happy Diwali from CapitUp — Your Benefits Portal (Beta) is live!",
-    "user_subject": "\U0001fa94 Happy Diwali! Your family's health cards are now one click away",
+    "hr_subject": "\U0001fa94 Happy Diwali from CapitUp: dhAIrya is live for your HR team (beta)",
+    "user_subject": "\U0001fa94 Happy Diwali! Your health cover is now on dhAIrya",
     "sender_name": "Team CapitUp India",
 }
 
@@ -143,16 +152,22 @@ def ensure_indexes(db):
 _HEAD = """<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F3EFE6;padding:24px 0;font-family:'Segoe UI',Arial,Helvetica,sans-serif;">
 <tr><td align="center">
 <table role="presentation" width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #E8D9B0;">
-  <tr><td align="center" style="background:#ffffff;padding:22px 24px 10px 24px;">
-    <img src="cid:logo_image" alt="CapitUp India" height="72" style="height:72px;width:auto;display:block;border:0;" />
+  <tr><td style="background:#ffffff;padding:20px 28px 14px 28px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+      <td valign="middle"><img src="cid:logo_image" alt="CapitUp India" height="56" style="height:56px;width:auto;display:block;border:0;" /></td>
+      <td valign="middle" align="right" style="font-family:'Segoe UI',Arial,sans-serif;">
+        <span style="font-size:26px;font-weight:800;color:#1c2430;letter-spacing:-0.5px;">dh<span style="color:#c9963f;">AI</span>rya</span><br/>
+        <span style="font-size:10px;font-weight:700;letter-spacing:2px;color:#8d5f29;">BY CAPITUP INDIA</span>
+      </td>
+    </tr></table>
   </td></tr>
-  <tr><td style="height:4px;background:#E8B547;background-image:linear-gradient(90deg,#C29B38,#F2D68C,#2CC3AE);font-size:0;line-height:0;">&nbsp;</td></tr>
+  <tr><td style="height:4px;background:#c9963f;background-image:linear-gradient(90deg,#8d5f29,#ecc976,#1aab93);font-size:0;line-height:0;">&nbsp;</td></tr>
 """
 
-_FOOT = """  <tr><td style="background:#0B1E30;padding:26px 28px;text-align:center;">
-    <p style="margin:0;color:#E8B547;font-size:15px;font-weight:800;letter-spacing:2px;">CAPITUP INDIA &middot; WE BACK YOU UP</p>
+_FOOT = """  <tr><td style="background:#1c2430;padding:26px 28px;text-align:center;">
+    <p style="margin:0;color:#ecc976;font-size:15px;font-weight:800;letter-spacing:2px;">CAPITUP INDIA &middot; WE BACK YOU UP</p>
     <p style="margin:8px 0 0 0;color:#C9D3DD;font-size:12px;line-height:1.6;">CapitUp India Pvt. Ltd. &nbsp;|&nbsp; HITEC City, Hyderabad<br/>
-    Questions? Write to <a href="mailto:{{support_email}}" style="color:#2CC3AE;text-decoration:none;">{{support_email}}</a> or simply reply to this email.</p>
+    Questions? Write to <a href="mailto:{{support_email}}" style="color:#1aab93;text-decoration:none;">{{support_email}}</a> or simply reply to this email.</p>
     <p style="margin:10px 0 0 0;color:#7C8B99;font-size:10px;">You are receiving this because your organisation's group health policy is serviced by CapitUp India.</p>
   </td></tr>
 </table>
@@ -163,67 +178,102 @@ _GREETING_BLOCK = """<tr><td style="padding:0;">
   </td></tr>"""
 
 _VIDEO_BLOCK = """<tr><td style="padding:6px 32px 8px 32px;" align="center">
-    <a href="{{video_url}}" style="text-decoration:none;"><img src="cid:video_thumb" alt="Watch the 60-second portal tour" width="560" style="width:100%;max-width:560px;height:auto;border-radius:10px;display:block;border:0;" /></a>
-    <p style="margin:8px 0 0 0;font-size:12px;color:#6B7785;">&#9654; Can't see the video? <a href="{{video_url}}" style="color:#0B1E30;font-weight:700;">Watch the portal tour here</a></p>
+    <a href="{{video_url}}" style="text-decoration:none;"><img src="cid:video_thumb" alt="Watch the 60-second dhAIrya tour" width="560" style="width:100%;max-width:560px;height:auto;border-radius:10px;display:block;border:0;" /></a>
+    <p style="margin:8px 0 0 0;font-size:12px;color:#6B7785;">&#9654; Can't see the video? <a href="{{video_url}}" style="color:#128a78;font-weight:700;">Watch the 60-second tour here</a></p>
   </td></tr>"""
+
+_BTN = "background:#128a78;color:#ffffff;text-decoration:none;font-size:15px;font-weight:800;padding:15px 34px;border-radius:8px;display:inline-block;border:2px solid #c9963f;"
+
+
+def _row(icon, title, text):
+    return (f'<tr><td valign="top" style="padding:7px 10px 7px 0;font-size:18px;width:30px;">{icon}</td>'
+            f'<td style="padding:7px 0;font-size:14px;line-height:1.6;color:#333;"><strong style="color:#1c2430;">{title}</strong> {text}</td></tr>')
 
 
 def hr_template():
+    features = "".join([
+        _row("&#128202;", "Executive Overview.", "Your policy, renewal date, live CD balance and covered lives on one screen. Send yourself a CD balance statement in one click."),
+        _row("&#128101;", "Employee Directory.", "Your active roster with portal status. Export it to Excel and fix a missing employee e-mail with the pencil icon."),
+        _row("&#128260;", "Endorsement Engine.", "Drop your joiners/leavers sheet in any layout. dhAIrya reads it, works out pro-rata premium and GST, and sends the batch to CapitUp for approval."),
+        _row("&#128200;", "Claims Analytics.", "Upload your TPA claims MIS for loss ratio, top conditions, deductions and renewal pointers."),
+        _row("&#127915;", "Request Queue.", "Raise a ticket to CapitUp, attach files and follow our replies in one place."),
+        _row("&#10024;", "Ask Copilot.", "Ask about your policy in plain words, such as &ldquo;What is our room rent limit?&rdquo;"),
+    ])
+    notes = "".join(f'<li style="margin:0 0 6px 0;">{t}</li>' for t in [
+        "<strong>Forgot your password?</strong> Self-service reset isn't built yet. Write to us and we'll issue a new login.",
+        "<strong>Endorsements need CapitUp approval.</strong> You'll see Approved or Sent back under <em>Recent batches</em> on the Endorsement Engine page.",
+        "<strong>AI answers can be wrong.</strong> The copilot reads your policy schedule, but the policy document is always final.",
+        "<strong>Claims still go through your TPA</strong> as today. Employee claim filing and detail corrections are marked &ldquo;Coming soon&rdquo;.",
+        "<strong>Top up ledger</strong> is handled by CapitUp for now. Ask us and we'll do it.",
+        "<strong>Desktop first.</strong> It works in a mobile browser too; there's no app yet. A few page headings still use older names, like &ldquo;Endorsement Studio&rdquo;.",
+    ])
     return _HEAD + """  {{greeting_block}}
   <tr><td style="padding:30px 32px 6px 32px;">
-    <p style="margin:0 0 6px 0;font-size:12px;font-weight:800;letter-spacing:2px;color:#C29B38;">A DIWALI GIFT FOR YOUR HR TEAM</p>
-    <h1 style="margin:0;font-size:26px;line-height:1.25;color:#0B1E30;font-family:Georgia,'Times New Roman',serif;">This Diwali, we're lighting up a new way to manage your team's health benefits.</h1>
+    <p style="margin:0 0 6px 0;font-size:12px;font-weight:800;letter-spacing:2px;color:#c9963f;">HAPPY DIWALI &middot; DHAIRYA IS LIVE FOR YOUR HR TEAM</p>
+    <h1 style="margin:0;font-size:26px;line-height:1.25;color:#1c2430;font-family:Georgia,'Times New Roman',serif;">Every policy, roster and ledger on one desk.</h1>
   </td></tr>
   <tr><td style="padding:16px 32px 4px 32px;font-size:15px;line-height:1.7;color:#333;">
     <p style="margin:0 0 14px 0;">Dear <strong>{{name}}</strong>,</p>
-    <p style="margin:0 0 14px 0;">Warm Diwali wishes to you, your family and everyone at <strong>{{company_name}}</strong>. May the season bring light, good health and safe celebrations to all.</p>
-    <p style="margin:0 0 14px 0;">We are truly happy to launch <strong>{{portal_name}}</strong>, {{portal_tagline}}, for your HR team. It brings your group health policy, your active list and every employee's family e-card into one secure place, so the questions you answer every day take seconds, not emails.</p>
+    <p style="margin:0 0 14px 0;">Warm Diwali wishes to you, your family and everyone at <strong>{{company_name}}</strong>. May the festival bring light, good health and a safe celebration to all of you.</p>
+    <p style="margin:0 0 14px 0;">We're happy to open <strong>dh<span style="color:#c9963f;">AI</span>rya</strong> to your HR team. <em>Dhairya</em> means steadiness, and that's what we want your group health benefits to feel like: your policy, your members, your CD balance and your requests to us, in one secure place.</p>
   </td></tr>
   <tr><td style="padding:6px 32px;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F8F5EC;border-radius:12px;border:1px solid #EFE3C2;">
-      <tr><td style="padding:18px 20px 6px 20px;font-size:13px;font-weight:800;letter-spacing:1px;color:#0B1E30;">WHAT YOU CAN DO TODAY</td></tr>
-      <tr><td style="padding:0 20px 16px 20px;font-size:14px;line-height:1.75;color:#333;">
-        &#129706; <strong>Find any employee's e-card</strong> by Employee ID and download it instantly.<br/>
-        &#128230; <strong>Download e-cards in bulk</strong> as one ZIP for onboarding or audits.<br/>
-        &#128106; <strong>See family coverage</strong>: dependents, relationships and card numbers at a glance.<br/>
-        &#128172; <strong>Tell us what to build next</strong> with the feedback button inside the portal.
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#faf8f4;border-radius:12px;border:1px solid #EFE3C2;">
+      <tr><td style="padding:18px 20px 4px 20px;font-size:13px;font-weight:800;letter-spacing:1px;color:#1c2430;">WHAT YOU CAN DO FROM DAY ONE</td></tr>
+      <tr><td style="padding:4px 20px 14px 20px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0">""" + features + """</table></td></tr>
+    </table>
+  </td></tr>
+  <tr><td style="padding:22px 32px 4px 32px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #CDEBE4;border-radius:12px;background:#F2FBF9;">
+      <tr><td style="padding:16px 20px;font-size:14px;line-height:1.7;color:#333;">
+        <strong style="color:#126f62;">&#128273; Signing in, in three steps</strong><br/>
+        1. Open <a href="{{portal_url}}" style="color:#128a78;font-weight:700;">{{portal_url}}</a><br/>
+        2. Enter your <strong>work e-mail</strong> and the <strong>temporary password</strong> we send you in a separate e-mail.<br/>
+        3. Set your own permanent password when asked. You land on your Executive Overview.<br/>
+        <span style="font-size:12px;color:#6B7785;">For your security, this e-mail never contains a password. Your login sees only {{company_name}}'s data.</span>
       </td></tr>
     </table>
   </td></tr>
-  <tr><td align="center" style="padding:24px 32px 10px 32px;">
-    <a href="{{portal_url}}" style="background:#0B1E30;color:#ffffff;text-decoration:none;font-size:15px;font-weight:800;padding:15px 34px;border-radius:8px;display:inline-block;border:2px solid #E8B547;">Open {{portal_name}} &rarr;</a>
-    <p style="margin:10px 0 0 0;font-size:12px;color:#6B7785;">Your step-by-step setup guide (PDF) is attached to this email.</p>
+  <tr><td align="center" style="padding:20px 32px 10px 32px;">
+    <a href="{{portal_url}}" style=\"""" + _BTN + """\">Open dhAIrya &rarr;</a>
+    <p style="margin:10px 0 0 0;font-size:12px;color:#6B7785;">Your step-by-step HR setup guide (PDF) is attached.</p>
   </td></tr>
   {{video_block}}
+  <tr><td style="padding:16px 32px 4px 32px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px dashed #1aab93;border-radius:12px;">
+      <tr><td style="padding:16px 18px;font-size:13px;line-height:1.7;color:#333;">
+        <strong style="color:#1c2430;">&#128106; Next: your employees.</strong> Each employee signs in at <a href="{{employee_url}}" style="color:#128a78;">{{employee_url}}</a> with their company, Employee ID and date of birth, and gets a 6-digit code on the e-mail in your roster. There they can see their cover and family members, download e-cards, ask the Policy Copilot, and request to add a dependent.<br/>
+        <strong>One thing we need from you:</strong> an e-mail for every employee. In <em>Employee Directory</em>, the <em>Unboarded</em> filter shows who can't sign in yet. E-cards appear once we've uploaded your insurer's PDFs.
+      </td></tr>
+    </table>
+  </td></tr>
   <tr><td style="padding:18px 32px 6px 32px;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0B1E30;border-radius:12px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#1c2430;border-radius:12px;">
       <tr><td style="padding:22px 22px 8px 22px;">
-        <p style="margin:0;font-size:12px;font-weight:800;letter-spacing:2px;color:#2CC3AE;">BETA &middot; BUILT WITH YOU</p>
-        <p style="margin:8px 0 0 0;font-size:20px;line-height:1.35;color:#ffffff;font-family:Georgia,'Times New Roman',serif;">Our promise has always been <span style="color:#E8B547;">&ldquo;We Back You Up.&rdquo;</span> This time, we're asking you to back us up too.</p>
-        <p style="margin:12px 0 0 0;font-size:14px;line-height:1.7;color:#C9D3DD;">{{portal_name}} is in <strong style="color:#ffffff;">beta</strong>. Some screens will change and a few things may not be perfect yet. Every comment you share goes straight to the team building it, and we'll make it right with your feedback. Let's back each other up.</p>
+        <p style="margin:0;font-size:12px;font-weight:800;letter-spacing:2px;color:#1aab93;">BETA &middot; BUILT WITH YOU</p>
+        <p style="margin:8px 0 0 0;font-size:20px;line-height:1.35;color:#ffffff;font-family:Georgia,'Times New Roman',serif;">Our promise has always been <span style="color:#ecc976;">&ldquo;We Back You Up.&rdquo;</span> This time, we're asking you to back us up too.</p>
+        <p style="margin:12px 0 0 0;font-size:14px;line-height:1.7;color:#C9D3DD;">dhAIrya is in <strong style="color:#ffffff;">beta</strong>. Some screens will change and a few things aren't perfect yet. Every note you send reaches the team building it. Let's back each other up.</p>
       </td></tr>
       <tr><td align="center" style="padding:10px 22px 24px 22px;">
-        <a href="{{feedback_url}}" style="background:#2CC3AE;color:#0B1E30;text-decoration:none;font-size:14px;font-weight:800;padding:13px 28px;border-radius:8px;display:inline-block;">&#128221; Share your feedback (2 minutes)</a>
+        <a href="{{feedback_url}}" style="background:#1aab93;color:#1c2430;text-decoration:none;font-size:14px;font-weight:800;padding:13px 28px;border-radius:8px;display:inline-block;">&#128221; Share your feedback (2 minutes)</a>
+        <p style="margin:10px 0 0 0;font-size:12px;color:#9FB0BF;">Something broken? Raise it in <em>Request Queue &rarr; Raise New Support Request</em>.</p>
       </td></tr>
     </table>
   </td></tr>
   <tr><td style="padding:18px 32px 4px 32px;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-left:4px solid #E8B547;background:#FFFBF0;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-left:4px solid #c9963f;background:#FFFBF0;">
       <tr><td style="padding:14px 16px;font-size:13px;line-height:1.65;color:#444;">
-        <strong style="color:#0B1E30;">&#128197; Data current as of {{data_cutoff}}.</strong> Policy details, active lists and e-cards in the portal reflect the files your team shared with us up to this date. Additions, deletions or corrections after that will appear after our next update. If something looks off, use the feedback button or reply to this email.
+        <strong style="color:#1c2430;">&#128197; How fresh is your data?</strong> dhAIrya is as current as the last active list, endorsement and claims file loaded for your company. Latest endorsement file we hold for {{company_name}}: <strong>{{data_cutoff}}</strong>. Anything sent after that appears once it is loaded and approved; <em>Recent batches</em> on the Endorsement Engine page shows exactly what's in.
       </td></tr>
     </table>
   </td></tr>
-  <tr><td style="padding:14px 32px 26px 32px;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px dashed #2CC3AE;border-radius:12px;">
-      <tr><td style="padding:16px 18px;font-size:13px;line-height:1.7;color:#333;">
-        <strong style="color:#0B1E30;">&#128640; Coming next: your employees.</strong> Share your employees' official email IDs with us and we'll invite them to their own dashboards, where they can download family e-cards, check who is covered, and chat with their policy for instant answers on room rent, maternity and claims.
-      </td></tr>
-    </table>
+  <tr><td style="padding:16px 32px 4px 32px;">
+    <p style="margin:0 0 8px 0;font-size:13px;font-weight:800;letter-spacing:1px;color:#1c2430;">GOOD TO KNOW IN THIS BETA</p>
+    <ul style="margin:0;padding:0 0 0 18px;font-size:13px;line-height:1.6;color:#444;">""" + notes + """</ul>
   </td></tr>
-  <tr><td style="padding:0 32px 28px 32px;font-size:14px;line-height:1.7;color:#333;">
+  <tr><td style="padding:20px 32px 28px 32px;font-size:14px;line-height:1.7;color:#333;">
     Wishing you a bright, happy and safe Diwali,<br/>
-    <strong style="color:#0B1E30;">{{sender_name}}</strong>
+    <strong style="color:#1c2430;">{{sender_name}}</strong>
   </td></tr>
 """ + _FOOT
 
@@ -231,41 +281,66 @@ def hr_template():
 def user_template():
     return _HEAD + """  {{greeting_block}}
   <tr><td style="padding:30px 32px 6px 32px;">
-    <p style="margin:0 0 6px 0;font-size:12px;font-weight:800;letter-spacing:2px;color:#C29B38;">YOUR HEALTH BENEFITS, ONE CLICK AWAY</p>
-    <h1 style="margin:0;font-size:26px;line-height:1.25;color:#0B1E30;font-family:Georgia,'Times New Roman',serif;">Your family's health cards are now in your pocket.</h1>
+    <p style="margin:0 0 6px 0;font-size:12px;font-weight:800;letter-spacing:2px;color:#c9963f;">HAPPY DIWALI FROM CAPITUP</p>
+    <h1 style="margin:0;font-size:26px;line-height:1.25;color:#1c2430;font-family:Georgia,'Times New Roman',serif;">Your health cover, steady and clear.</h1>
   </td></tr>
   <tr><td style="padding:16px 32px 4px 32px;font-size:15px;line-height:1.7;color:#333;">
     <p style="margin:0 0 14px 0;">Dear <strong>{{name}}</strong>,</p>
-    <p style="margin:0 0 14px 0;">Happy Diwali from all of us at CapitUp! Together with <strong>{{company_name}}</strong>, we're happy to welcome you to <strong>{{portal_name}}</strong>, {{portal_tagline}}.</p>
+    <p style="margin:0 0 14px 0;">Together with <strong>{{company_name}}</strong>, we're happy to welcome you to <strong>dh<span style="color:#c9963f;">AI</span>rya</strong>, your group health benefits portal.</p>
   </td></tr>
   <tr><td style="padding:6px 32px;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F8F5EC;border-radius:12px;border:1px solid #EFE3C2;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#faf8f4;border-radius:12px;border:1px solid #EFE3C2;">
       <tr><td style="padding:18px 20px 16px 20px;font-size:14px;line-height:1.75;color:#333;">
-        &#129706; <strong>Download your family e-cards</strong> any time, from any device.<br/>
-        &#128106; <strong>See who is covered</strong>: your dependents and their card numbers.<br/>
-        &#129302; <strong>Chat with your policy</strong> for quick answers on room rent, maternity and claims.
+        &#129706; <strong>See your cover and e-card</strong>, and download it as a PDF.<br/>
+        &#128106; <strong>See who is covered</strong>: your family members on the policy.<br/>
+        &#10024; <strong>Ask the Policy Copilot</strong> about room rent, maternity or waiting periods.<br/>
+        &#10133; <strong>Request to add a dependent</strong> and track it in the Request tracker.
       </td></tr>
     </table>
   </td></tr>
-  <tr><td align="center" style="padding:24px 32px 10px 32px;">
-    <a href="{{portal_url}}" style="background:#0B1E30;color:#ffffff;text-decoration:none;font-size:15px;font-weight:800;padding:15px 34px;border-radius:8px;display:inline-block;border:2px solid #E8B547;">Open my dashboard &rarr;</a>
+  <tr><td style="padding:18px 32px 4px 32px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #CDEBE4;border-radius:12px;background:#F2FBF9;">
+      <tr><td style="padding:16px 20px;font-size:14px;line-height:1.7;color:#333;">
+        <strong style="color:#126f62;">&#128273; How to sign in</strong><br/>
+        1. Open <a href="{{portal_url}}" style="color:#128a78;font-weight:700;">{{portal_url}}</a><br/>
+        2. Pick <strong>{{company_name}}</strong>, enter your <strong>Employee ID</strong> and <strong>date of birth</strong>, then click <em>Send sign-in code</em>.<br/>
+        3. Enter the 6-digit code sent to this e-mail address (valid for 10 minutes).
+      </td></tr>
+    </table>
+  </td></tr>
+  <tr><td align="center" style="padding:22px 32px 10px 32px;">
+    <a href="{{portal_url}}" style=\"""" + _BTN + """\">Open my dashboard &rarr;</a>
   </td></tr>
   {{video_block}}
   <tr><td style="padding:18px 32px 6px 32px;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0B1E30;border-radius:12px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#1c2430;border-radius:12px;">
       <tr><td style="padding:22px 22px 8px 22px;">
-        <p style="margin:0;font-size:20px;line-height:1.35;color:#ffffff;font-family:Georgia,'Times New Roman',serif;">We back you up. <span style="color:#E8B547;">Back us up with your feedback.</span></p>
-        <p style="margin:10px 0 0 0;font-size:14px;line-height:1.7;color:#C9D3DD;">This is a <strong style="color:#ffffff;">beta</strong>. Tell us what's working and what isn't, and we'll keep making it better.</p>
+        <p style="margin:0;font-size:20px;line-height:1.35;color:#ffffff;font-family:Georgia,'Times New Roman',serif;">We back you up. <span style="color:#ecc976;">Back us up with your feedback.</span></p>
+        <p style="margin:10px 0 0 0;font-size:14px;line-height:1.7;color:#C9D3DD;">dhAIrya is in <strong style="color:#ffffff;">beta</strong>. Tell us what works and what doesn't, and we'll keep making it better.</p>
       </td></tr>
       <tr><td align="center" style="padding:10px 22px 24px 22px;">
-        <a href="{{feedback_url}}" style="background:#2CC3AE;color:#0B1E30;text-decoration:none;font-size:14px;font-weight:800;padding:13px 28px;border-radius:8px;display:inline-block;">&#128221; Share your feedback</a>
+        <a href="{{feedback_url}}" style="background:#1aab93;color:#1c2430;text-decoration:none;font-size:14px;font-weight:800;padding:13px 28px;border-radius:8px;display:inline-block;">&#128221; Share your feedback</a>
       </td></tr>
     </table>
   </td></tr>
   <tr><td style="padding:18px 32px 26px 32px;font-size:12px;line-height:1.6;color:#6B7785;">
-    Data current as of {{data_cutoff}}. If anything looks wrong, reply to this email or write to {{support_email}}.
+    Your e-card appears once your insurer's card has been uploaded. Claims still go through your TPA as usual. AI answers can be wrong; your policy document is final. Questions? Reply to this e-mail or write to {{support_email}}.
   </td></tr>
 """ + _FOOT
+
+
+def data_date_for(cfg, company):
+    """Match a company against the "Name = date" lines; first keyword hit wins."""
+    def norm(x):
+        return re.sub(r"[^a-z0-9]", "", str(x or "").lower())
+    comp = norm(company)
+    for line in str(cfg.get("company_data_dates", "")).splitlines():
+        if "=" not in line:
+            continue
+        key, val = (x.strip() for x in line.split("=", 1))
+        if norm(key) and val and norm(key) in comp:
+            return val
+    return cfg["data_cutoff"]
 
 
 def render_email(tmpl, ctx, festive, has_video):
@@ -445,14 +520,17 @@ def render_launch_center(db, helpers):
         new["hr_portal_url"] = c1.text_input("HR portal URL", cfg["hr_portal_url"], key="lc_hrurl")
         new["user_portal_url"] = c2.text_input("Employee portal URL", cfg["user_portal_url"], key="lc_uurl")
         new["feedback_form_url"] = st.text_input("Feedback Google Form (pre-fill URL)", cfg["feedback_form_url"], key="lc_fburl")
-        new["data_cutoff"] = c1.text_input("Data current as of", cfg["data_cutoff"], key="lc_cutoff",
-                                           help="Date of the latest client files loaded into the portal.")
+        new["data_cutoff"] = c1.text_input("Data date fallback", cfg["data_cutoff"], key="lc_cutoff",
+                                           help="Used when a company has no line below. dhAIrya has no single 'data as of' date.")
         new["support_email"] = c2.text_input("Support / reply-to email", cfg["support_email"], key="lc_support")
         new["video_url"] = c1.text_input("Launch video link (YouTube / Drive)", cfg["video_url"], key="lc_video",
                                          help="Leave blank to hide the video block in the email.")
         new["sender_name"] = c2.text_input("Sender name", cfg["sender_name"], key="lc_sender")
         new["hr_subject"] = c1.text_input("HR email subject", cfg["hr_subject"], key="lc_hrsubj")
         new["user_subject"] = c2.text_input("Employee email subject", cfg["user_subject"], key="lc_usubj")
+        new["company_data_dates"] = st.text_area(
+            "Latest endorsement file per company (one 'Company = date' per line)", cfg["company_data_dates"],
+            height=150, key="lc_dates", help="Matched by a word in the company name. Check each client's Recent batches before sending.")
         new["festive_greeting"] = st.toggle("\U0001fa94 Include Diwali greeting card", cfg["festive_greeting"], key="lc_festive")
         if st.button("\U0001f4be Save campaign settings", type="primary", key="lc_save"):
             save_config(db, new)
@@ -578,21 +656,22 @@ def render_launch_center(db, helpers):
                 return {
                     "name": c.get("name") or "HR Team", "company_name": comp,
                     "portal_name": cfg["portal_name"], "portal_tagline": cfg["portal_tagline"],
-                    "portal_url": cfg["hr_portal_url"], "data_cutoff": cfg["data_cutoff"],
+                    "portal_url": cfg["hr_portal_url"], "data_cutoff": data_date_for(cfg, comp),
+                    "employee_url": cfg["user_portal_url"],
                     "support_email": cfg["support_email"], "sender_name": cfg["sender_name"],
                     "video_url": cfg["video_url"],
                     "feedback_url": feedback_link(cfg["feedback_form_url"], c.get("email", "HR"), c.get("name", "HR"), comp),
                 }
 
             guide = asset("hr_portal_guide", "hr_portal_guide")
-            st.caption(("\U0001f4ce Attaches: CapitUp_HR_Portal_Setup_Guide.pdf" if guide else "⚠️ No setup guide PDF available") +
+            st.caption(("\U0001f4ce Attaches: dhAIrya_HR_Setup_Guide.pdf" if guide else "⚠️ No setup guide PDF available") +
                        (" · \U0001fa94 Diwali card on" if cfg["festive_greeting"] else "") +
                        (" · ▶️ video block on" if has_video else " · video block off (add a link in settings)"))
             if st.checkbox("\U0001f441️ Preview (first recipient)", value=True, key="lc_hr_prev"):
                 preview(render_email(tmpl, ctx_for(sample), cfg["festive_greeting"], has_video), banner_hr)
 
             images = {"logo_image": logo_b, "launch_banner": banner_hr, "video_thumb": thumb_b}
-            atts = [("CapitUp_HR_Portal_Setup_Guide.pdf", guide)]
+            atts = [("dhAIrya_HR_Setup_Guide.pdf", guide)]
 
             st.markdown("---")
             t1, t2 = st.columns([2, 1])
@@ -681,7 +760,8 @@ def render_launch_center(db, helpers):
                 return {
                     "name": u.get("name") or "there", "company_name": comp,
                     "portal_name": cfg["portal_name"], "portal_tagline": cfg["portal_tagline"],
-                    "portal_url": cfg["user_portal_url"], "data_cutoff": cfg["data_cutoff"],
+                    "portal_url": cfg["user_portal_url"], "data_cutoff": data_date_for(cfg, comp),
+                    "employee_url": cfg["user_portal_url"],
                     "support_email": cfg["support_email"], "sender_name": cfg["sender_name"], "video_url": cfg["video_url"],
                     "feedback_url": feedback_link(cfg["feedback_form_url"], u.get("emp_id", ""), u.get("name", ""), comp),
                 }
