@@ -201,7 +201,8 @@ def hr_template():
     ])
     notes = "".join(f'<li style="margin:0 0 6px 0;">{t}</li>' for t in [
         "<strong>Forgot your password?</strong> Self-service reset isn't built yet. Write to us and we'll issue a new login.",
-        "<strong>Endorsements need CapitUp approval.</strong> You'll see Approved or Sent back under <em>Recent batches</em> on the Endorsement Engine page.",
+        "<strong>Endorsements need CapitUp approval.</strong> You get an e-mail when a batch is approved (with your new CD balance) or sent back (with the reason).",
+        "<strong>Idle sign-out.</strong> For safety, dhAIrya signs you out after 10 minutes without activity, with a &ldquo;Still there?&rdquo; warning first.",
         "<strong>AI answers can be wrong.</strong> The copilot reads your policy schedule, but the policy document is always final.",
         "<strong>Claims still go through your TPA</strong> as today. Employee claim filing and detail corrections are marked &ldquo;Coming soon&rdquo;.",
         "<strong>Top up ledger</strong> is handled by CapitUp for now. Ask us and we'll do it.",
@@ -229,7 +230,7 @@ def hr_template():
         <strong style="color:#126f62;">&#128273; Signing in, in three steps</strong><br/>
         1. Open <a href="{{portal_url}}" style="color:#128a78;font-weight:700;">{{portal_url}}</a><br/>
         2. Enter your <strong>work e-mail</strong> and the <strong>temporary password</strong> we send you in a separate e-mail.<br/>
-        3. Set your own permanent password when asked. You land on your Executive Overview.<br/>
+        3. Set your own permanent password when asked. You land on your Executive Overview, with a <em>Getting started</em> checklist to guide your first day.<br/>
         <span style="font-size:12px;color:#6B7785;">For your security, this e-mail never contains a password. Your login sees only {{company_name}}'s data.</span>
       </td></tr>
     </table>
@@ -256,7 +257,7 @@ def hr_template():
       </td></tr>
       <tr><td align="center" style="padding:10px 22px 24px 22px;">
         <a href="{{feedback_url}}" style="background:#1aab93;color:#1c2430;text-decoration:none;font-size:14px;font-weight:800;padding:13px 28px;border-radius:8px;display:inline-block;">&#128221; Share your feedback (2 minutes)</a>
-        <p style="margin:10px 0 0 0;font-size:12px;color:#9FB0BF;">Something broken? Raise it in <em>Request Queue &rarr; Raise New Support Request</em>.</p>
+        <p style="margin:10px 0 0 0;font-size:12px;color:#9FB0BF;">Something not working? Click <em>Report a problem</em> at the top of any page. It comes straight to us.</p>
       </td></tr>
     </table>
   </td></tr>
@@ -324,7 +325,7 @@ def user_template():
     </table>
   </td></tr>
   <tr><td style="padding:18px 32px 26px 32px;font-size:12px;line-height:1.6;color:#6B7785;">
-    Your e-card appears once your insurer's card has been uploaded. Claims still go through your TPA as usual. AI answers can be wrong; your policy document is final. Questions? Reply to this e-mail or write to {{support_email}}.
+    Your e-card appears once your insurer's card has been uploaded. Claims still go through your TPA as usual. AI answers can be wrong; your policy document is final. Something not working? Use <em>Report a problem</em> at the top of any page, reply to this e-mail, or write to {{support_email}}.
   </td></tr>
 """ + _FOOT
 
