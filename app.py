@@ -720,8 +720,8 @@ WELCOME_KIT_TEMPLATE = """<div style="font-family: 'Segoe UI', Arial, sans-serif
 
     <h3 style="color: #0B1E30; font-size: 15px; margin: 26px 0 8px 0; border-bottom: 2px solid #C29B38; padding-bottom: 4px;">Need help? Contact CapitUp</h3>
     <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-      <tr><td style="width: 40%; font-weight: bold; color: #0B1E30; padding: 4px 0; vertical-align: top;">📞 Call us:</td><td style="color: #333;">+91 97030 82345</td></tr>
-      <tr><td style="font-weight: bold; color: #0B1E30; padding: 4px 0; vertical-align: top;">✉️ Email us:</td><td style="color: #333;"><a href="mailto:info@capitupindia.com" style="color: #7A1F2B;">info@capitupindia.com</a></td></tr>
+      <tr><td style="width: 40%; font-weight: bold; color: #0B1E30; padding: 4px 0; vertical-align: top;">📞 Call us:</td><td style="color: #333;">+91 99638 03876 (Uday)</td></tr>
+      <tr><td style="font-weight: bold; color: #0B1E30; padding: 4px 0; vertical-align: top;">✉️ Email us:</td><td style="color: #333;"><a href="mailto:syamala.g@capitupindia.com" style="color: #7A1F2B;">syamala.g@capitupindia.com</a> &nbsp;|&nbsp; <a href="mailto:info@capitupindia.com" style="color: #7A1F2B;">info@capitupindia.com</a></td></tr>
       <tr><td style="font-weight: bold; color: #0B1E30; padding: 4px 0; vertical-align: top;">📍 Visit us:</td><td style="color: #333;">4th Floor, HUDA Techno Enclave, HITEC City, Hyderabad-500081</td></tr>
     </table>
     <p style="font-size: 13px; font-weight: bold; color: #0B1E30; margin: 18px 0 6px 0;">Escalation matrix (if your query is not resolved)</p>
