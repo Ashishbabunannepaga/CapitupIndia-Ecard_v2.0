@@ -18,6 +18,7 @@ import requests
 import re  
 import secrets  # Cryptographically secure OTP generation
 import urllib.parse  # URL encoding for Google Form pre-fill links
+import html  # escaping values typed into the e-mail template
 from dataclasses import dataclass
 from typing import Optional, List
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -678,6 +679,90 @@ def send_multi_ecard_email(recipient_email, subject, body_html, cards_list):
         return True, None
     except Exception as e: return False, str(e)
 
+# --- WELCOME KIT E-MAIL (IndusInd General Insurance) ---
+WELCOME_KIT_TEMPLATE = """<div style="font-family: 'Segoe UI', Arial, sans-serif; color: #333; line-height: 1.6; max-width: 650px; margin: 0 auto; border: 1px solid #C29B38; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.05); background-color: #ffffff;">
+  <div style="background-color: #0B1E30; padding: 28px 24px; text-align: center; border-bottom: 3px solid #C29B38;">
+    <!-- LOGO -->
+    <h2 style="color: #ffffff; margin: 0; font-size: 22px; letter-spacing: 1px; font-weight: 800; text-transform: uppercase;">CAPITUP INDIA</h2>
+    <p style="color: #C29B38; margin: 5px 0 0 0; font-size: 11px; font-weight: bold; letter-spacing: 2px;">YOUR SECURE EMPLOYEE BENEFITS PARTNER</p>
+  </div>
+  <div style="background-color: #7A1F2B; padding: 10px 24px; text-align: center;">
+    <p style="margin: 0; color: #ffffff; font-size: 12px; letter-spacing: 1px;">GROUP HEALTH INSURANCE &nbsp;|&nbsp; INSURED BY <strong>INDUSIND GENERAL INSURANCE</strong></p>
+  </div>
+  <div style="padding: 32px 24px;">
+    <p style="font-size: 15px; margin-top: 0;">Dear <strong>{{name}}</strong>,</p>
+    <p style="font-size: 14px;">Welcome to your Group Health Insurance cover, arranged by <strong>CapitUp India</strong> for <strong>{{company_name}}</strong>. Your policy is with <strong>IndusInd General Insurance Company Limited</strong> (formerly Reliance General Insurance) and is active for the period <strong>{{policy_period}}</strong>.</p>
+    <p style="font-size: 14px;">Your Health Card / E-Card is attached. Please save it on your phone and keep a copy handy: you will need it at the hospital for cashless treatment.</p>
+    <div style="background-color: #F4F6F8; border-left: 4px solid #C29B38; padding: 14px; margin: 20px 0; border-radius: 4px;">
+      <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+        <tr><td style="width: 40%; font-weight: bold; color: #0B1E30; padding: 3px 0;">Employee ID:</td><td style="color: #333;">{{emp_id}}</td></tr>
+        <tr><td style="font-weight: bold; color: #0B1E30; padding: 3px 0;">Company:</td><td style="color: #333;">{{company_name}}</td></tr>
+        <tr><td style="font-weight: bold; color: #0B1E30; padding: 3px 0;">Insurer:</td><td style="color: #333;">IndusInd General Insurance</td></tr>
+        <tr><td style="font-weight: bold; color: #0B1E30; padding: 3px 0;">Policy Number:</td><td style="color: #333;">{{policy_no}}</td></tr>
+        <tr><td style="font-weight: bold; color: #0B1E30; padding: 3px 0;">Policy Period:</td><td style="color: #333;">{{policy_period}}</td></tr>
+      </table>
+    </div>
+
+    <h3 style="color: #0B1E30; font-size: 15px; margin: 26px 0 8px 0; border-bottom: 2px solid #C29B38; padding-bottom: 4px;">How to use your cover</h3>
+    <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+      <tr>
+        <td style="vertical-align: top; padding: 8px 10px 8px 0; width: 50%;">
+          <p style="margin: 0 0 4px 0; font-weight: bold; color: #7A1F2B;">🏥 Cashless (network hospital)</p>
+          <p style="margin: 0; color: #444;">Show your e-card and a photo ID at the hospital's insurance / TPA desk. For a planned admission, inform the insurer <strong>at least 48 hours before</strong>. In an emergency, inform the insurer <strong>within 24 hours</strong> of admission. {{tpa_line}} If you need help, call CapitUp (details below).</p>
+        </td>
+        <td style="vertical-align: top; padding: 8px 0 8px 10px; width: 50%;">
+          <p style="margin: 0 0 4px 0; font-weight: bold; color: #7A1F2B;">🧾 Reimbursement</p>
+          <p style="margin: 0; color: #444;">If you are treated at a non-network hospital, pay the bills and submit the attached <strong>Claim Form</strong> with the original bills, discharge summary and reports, within the time limit in your policy terms. Write to us if you need help with it.</p>
+        </td>
+      </tr>
+    </table>
+    <p style="font-size: 13px; margin: 10px 0 0 0;">Find a network hospital near you: <a href="https://www.indusindinsurance.com/about-us/our-network-hospitals/" style="color: #7A1F2B; font-weight: bold;">IndusInd network hospital locator</a></p>
+
+    <h3 style="color: #0B1E30; font-size: 15px; margin: 26px 0 8px 0; border-bottom: 2px solid #C29B38; padding-bottom: 4px;">Need help? Contact CapitUp</h3>
+    <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+      <tr><td style="width: 40%; font-weight: bold; color: #0B1E30; padding: 4px 0; vertical-align: top;">📞 Call us:</td><td style="color: #333;">+91 97030 82345</td></tr>
+      <tr><td style="font-weight: bold; color: #0B1E30; padding: 4px 0; vertical-align: top;">✉️ Email us:</td><td style="color: #333;"><a href="mailto:info@capitupindia.com" style="color: #7A1F2B;">info@capitupindia.com</a></td></tr>
+      <tr><td style="font-weight: bold; color: #0B1E30; padding: 4px 0; vertical-align: top;">📍 Visit us:</td><td style="color: #333;">4th Floor, HUDA Techno Enclave, HITEC City, Hyderabad-500081</td></tr>
+    </table>
+    <p style="font-size: 13px; font-weight: bold; color: #0B1E30; margin: 18px 0 6px 0;">Escalation matrix (if your query is not resolved)</p>
+    <table style="width: 100%; border-collapse: collapse; font-size: 13px; border: 1px solid #e5e7eb;">
+      <tr style="background-color: #0B1E30; color: #ffffff;"><td style="padding: 6px 10px; font-weight: bold;">Level</td><td style="padding: 6px 10px; font-weight: bold;">Contact</td><td style="padding: 6px 10px; font-weight: bold;">Phone</td></tr>
+      <tr><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">Level 1</td><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">Uday</td><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">+91 99638 03876</td></tr>
+      <tr style="background-color: #F4F6F8;"><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">Level 2</td><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">Syamala G</td><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">+91 94945 46630</td></tr>
+      <tr><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">Level 3</td><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">Sravani</td><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">+91 93811 34800</td></tr>
+    </table>
+
+    <!-- Correction Form Button with Dynamic URL-encoded parameters -->
+    <div style="text-align: center; margin: 30px 0 0 0;">
+      <p style="font-size: 13px; margin: 0 0 10px 0;">Is your name, date of birth or a dependant wrong on the e-card? Tell us before the window closes.</p>
+      <a href="{{correction_url}}" style="background-color: #23C2A9; color: #ffffff; padding: 12px 26px; text-decoration: none; font-size: 13px; font-weight: bold; border-radius: 6px; display: inline-block;">📝 Request E-Card Correction</a>
+      <p style="color: #C29B38; font-size: 11px; font-weight: bold; margin-top: 8px;">⏱️ Correction Form Window Closes On: {{deadline}}</p>
+    </div>
+  </div>
+  <!-- FOOTER -->
+  <div style="background-color: #F4F6F8; padding: 24px; text-align: center; border-top: 1px solid #e5e7eb;">
+    <p style="margin: 0; font-size: 12px; color: #0B1E30; font-weight: bold;">Thank you for being part of the CapitUp Family</p>
+    <p style="margin: 4px 0 0 0; font-size: 10px; color: #888;">CapitUp India Pvt. Ltd. | 4th Floor, HUDA Techno Enclave, HITEC City, Hyderabad-500081</p>
+    <p style="margin: 6px 0 0 0; font-size: 9px; color: #999;">Insurance is underwritten by IndusInd General Insurance Company Limited (formerly Reliance General Insurance Company Limited), IRDAI Reg. No. 103. Cover is subject to the terms, conditions and exclusions of your group policy.</p>
+  </div>
+</div>"""
+
+def render_welcome_body(template_html, name, emp_id, company_name, policy_no, deadline, correction_url, policy_period, tpa_desk=""):
+    """Fill the welcome-kit placeholders. Values typed in the UI are HTML-escaped."""
+    tpa_desk = (tpa_desk or "").strip()
+    if tpa_desk:
+        tpa_line = f"Your claims desk / TPA: <strong>{html.escape(tpa_desk)}</strong>."
+    else:
+        tpa_line = "For cashless approval, call the claims helpline printed on your e-card."
+    return template_html.replace("{{name}}", str(name))\
+                        .replace("{{emp_id}}", str(emp_id))\
+                        .replace("{{company_name}}", str(company_name))\
+                        .replace("{{policy_no}}", str(policy_no))\
+                        .replace("{{policy_period}}", html.escape(str(policy_period or "").strip()))\
+                        .replace("{{tpa_line}}", tpa_line)\
+                        .replace("{{deadline}}", str(deadline))\
+                        .replace("{{correction_url}}", str(correction_url))
+
 def send_launch_email(recipient_email, subject, body_html, guide_asset_key=None, banner_asset_key=None):
     try:
         SMTP_CONFIG = st.secrets["smtp"]
@@ -902,7 +987,7 @@ if persona_mode == "👤 User (Employee) Self-Service":
                 col_q1, col_q2, col_q3 = st.columns(3)
                 if col_q1.button("🏥 Room Rent Limit", width="stretch"):
                     st.session_state.chat_history.append({"role": "user", "content": "What is my room rent limit?"})
-                    st.session_state.chat_history.append({"role": "assistant", "content": "Under your company's Group Health Insurance with Bajaj Allianz, **Room Rent is capped at 1% of Sum Insured per day** for Normal Rooms, and **2% for ICU charges**. If you choose a higher room category, proportionate deductions will apply."})
+                    st.session_state.chat_history.append({"role": "assistant", "content": "Under your company's Group Health Insurance policy, **Room Rent is capped at 1% of Sum Insured per day** for Normal Rooms, and **2% for ICU charges**. If you choose a higher room category, proportionate deductions will apply."})
                 if col_q2.button("🤱 Maternity Coverage", width="stretch"):
                     st.session_state.chat_history.append({"role": "user", "content": "Is maternity covered?"})
                     st.session_state.chat_history.append({"role": "assistant", "content": "Yes! Maternity is covered up to **₹50,000 for Normal Delivery** and **₹75,000 for C-Section**. The standard 9-month waiting period is waived under your corporate group policy."})
@@ -1401,50 +1486,23 @@ with tab_email:
             set_form_status(gas_url, "close")
             save_deadline_to_db(active_scope_policy or "DEFAULT", "Form Closed"); st.warning("Form Closed!"); time.sleep(1); st.rerun()
             
-        subj_in = st.text_input("SUBJECT LINE", value="Your Health Insurance E-Card & Welcome Kit", key="t6_subj")
-        
+        subj_in = st.text_input("SUBJECT LINE", value="Your Health Insurance E-Card & Welcome Kit | IndusInd General Insurance", key="t6_subj")
+        c_pp1, c_pp2 = st.columns(2)
+        policy_period_in = c_pp1.text_input("POLICY PERIOD (required)", value="", placeholder="e.g. 01-Dec-2026 to 30-Nov-2027", key="t6_policy_period")
+        tpa_in = c_pp2.text_input("CLAIMS DESK / TPA (optional)", value="", placeholder="e.g. TPA name and helpline on the e-card", key="t6_tpa")
+        if not policy_period_in.strip():
+            st.warning("Enter the policy period. Sending is disabled until it is filled in.")
+
         logo_tag_component = """<div style="text-align: center; margin-bottom: 15px;"><img src="cid:logo_image" alt="CapitUp India Logo" style="height: 60px; width: auto; display: inline-block;" /></div>""" if get_asset("logo") else ""
-        
-        brand_html_template = f"""<div style="font-family: 'Segoe UI', Arial, sans-serif; color: #333; line-height: 1.6; max-width: 650px; margin: 0 auto; border: 1px solid #C29B38; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.05); background-color: #ffffff;">
-  <div style="background-color: #0B1E30; padding: 28px 24px; text-align: center; border-bottom: 3px solid #C29B38;">
-    {logo_tag_component}
-    <h2 style="color: #ffffff; margin: 0; font-size: 22px; letter-spacing: 1px; font-weight: 800; text-transform: uppercase;">CAPITUP INDIA</h2>
-    <p style="color: #C29B38; margin: 5px 0 0 0; font-size: 11px; font-weight: bold; letter-spacing: 2px;">YOUR SECURE EMPLOYEE BENEFITS PARTNER</p>
-  </div>
-  <div style="padding: 32px 24px;">
-    <p style="font-size: 15px; margin-top: 0;">Dear <strong>{{{{name}}}}</strong>,</p>
-    <p style="font-size: 14px;">We are pleased to welcome you to the <strong>CapitUp India</strong> ecosystem. Your Group Health Insurance policy with <strong>Bajaj Allianz General Insurance Company</strong> is active for the period <strong>26-May-2026 to 25-May-2027</strong>.</p>
-    <p style="font-size: 14px;">Please find attached your Health Cards / E-Cards and policy coverage details for your reference.</p>
-    <div style="background-color: #F4F6F8; border-left: 4px solid #C29B38; padding: 14px; margin: 20px 0; border-radius: 4px;">
-      <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-        <tr><td style="width: 40%; font-weight: bold; color: #0B1E30; padding: 3px 0;">Employee ID:</td><td style="color: #333;">{{{{emp_id}}}}</td></tr>
-        <tr><td style="font-weight: bold; color: #0B1E30; padding: 3px 0;">Company:</td><td style="color: #333;">{{{{company_name}}}}</td></tr>
-        <tr><td style="font-weight: bold; color: #0B1E30; padding: 3px 0;">Policy Number:</td><td style="color: #333;">{{{{policy_no}}}}</td></tr>
-      </table>
-    </div>
-    
-    <!-- Correction Form Button with Dynamic URL-encoded parameters -->
-    <div style="text-align: center; margin: 30px 0;">
-      <a href="{{{{correction_url}}}}" style="background-color: #23C2A9; color: #ffffff; padding: 12px 26px; text-decoration: none; font-size: 13px; font-weight: bold; border-radius: 6px; display: inline-block;">📝 Request E-Card Correction</a>
-      <p style="color: #C29B38; font-size: 11px; font-weight: bold; margin-top: 8px;">⏱️ Correction Form Window Closes On: {{{{deadline}}}}</p>
-    </div>
-  </div>
-  <!-- FOOTER -->
-  <div style="background-color: #F4F6F8; padding: 24px; text-align: center; border-top: 1px solid #e5e7eb;">
-    <p style="margin: 0; font-size: 12px; color: #0B1E30; font-weight: bold;">Thank you for being part of the CapitUp Family</p>
-    <p style="margin: 4px 0 0 0; font-size: 10px; color: #888;">CapitUp India Pvt. Ltd. | HITEC City, Hyderabad</p>
-  </div>
-</div>"""
+
+        brand_html_template = WELCOME_KIT_TEMPLATE.replace("<!-- LOGO -->", logo_tag_component)
         html_in = st.text_area("HTML BODY TEMPLATE", value=brand_html_template, height=200, key="t6_html_tmpl")
-        
+
         if st.checkbox("👁️ Live Preview", key="prev_t6"):
-            dummy_corr = "https://docs.google.com/forms/d/e/YOUR_FORM_ID/viewform?usp=pp_url&entry.877007954=Employee&entry.863990631=MOCK101&entry.1115400795=OG-27-1801-8403-00000112"
-            rendered_t6 = html_in.replace("{{name}}", st.session_state.username)\
-                                 .replace("{{emp_id}}", "MOCK-101")\
-                                 .replace("{{company_name}}", active_display_company)\
-                                 .replace("{{policy_no}}", active_scope_policy or "OG-27-1801-8403-00000112")\
-                                 .replace("{{deadline}}", dline)\
-                                 .replace("{{correction_url}}", dummy_corr)
+            dummy_corr = "https://docs.google.com/forms/d/e/YOUR_FORM_ID/viewform?usp=pp_url&entry.877007954=Employee&entry.863990631=MOCK101&entry.1115400795=POLICY-NO"
+            rendered_t6 = render_welcome_body(html_in, st.session_state.username, "MOCK-101", active_display_company,
+                                              active_scope_policy or "POLICY-NO", dline, dummy_corr,
+                                              policy_period_in or "[policy period]", tpa_in)
             st.components.v1.html(rendered_t6, height=450, scrolling=True)
 
     with col_l2:
@@ -1501,11 +1559,34 @@ with tab_email:
             st.dataframe(pd.DataFrame(ready_jobs + missing_jobs), hide_index=True, width="stretch")
 
         st.markdown("---")
+        st.markdown("##### 🧪 Send a Test E-mail First")
+        st.caption("Sends ONE sample e-mail to the address below only. No employee is e-mailed and nothing in the queue is marked as sent.")
+        c_t1, c_t2 = st.columns([2, 1])
+        test_to = c_t1.text_input("Test recipient e-mail", placeholder="you@capitupindia.com", key="t6_test_to")
+        test_attach = c_t2.checkbox("Attach a sample e-card from the queue", value=False, key="t6_test_attach",
+                                    help="Attaches the e-card of the first ready employee so you can check the attachment. Leave off to send without e-cards.")
+        if st.button("📨 Send Test E-mail", width="stretch", key="t6_test_send",
+                     disabled=(not test_to.strip() or not policy_period_in.strip())):
+            t_addr = test_to.strip().lower()
+            if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", t_addr):
+                st.error("That doesn't look like a valid e-mail address.")
+            else:
+                sample = ready_jobs[0] if ready_jobs else {"EMP ID": "SAMPLE-001", "Name": "Sample Employee", "Policy": active_scope_policy or "POLICY-NO"}
+                t_cards = get_cards_from_db(sample["EMP ID"], policy_no=sample["Policy"]) if (test_attach and ready_jobs) else []
+                t_corr = f"https://docs.google.com/forms/d/e/1FAIpQLSfMZ0SHY4pr9NVfZwHQRhU6Jmy-vN2K8INePRdkYQarVA_EMw/viewform?usp=pp_url&entry.877007954={urllib.parse.quote(str(sample['Name']))}&entry.863990631={urllib.parse.quote(str(sample['EMP ID']))}&entry.1115400795={urllib.parse.quote(str(sample['Policy']))}"
+                t_body = render_welcome_body(html_in, sample["Name"], sample["EMP ID"], active_display_company, sample["Policy"],
+                                             dline, t_corr, policy_period_in, tpa_in)
+                ok, err = send_multi_ecard_email(t_addr, "[TEST] " + subj_in, t_body, t_cards or [])
+                log_email_dispatch(sample["EMP ID"], sample["Name"], t_addr, sample["Policy"], "DELIVERED" if ok else "FAILED", err, campaign_type="WELCOME_KIT_TEST")
+                if ok: st.success(f"Test e-mail sent to {t_addr} ({len(t_cards or [])} e-card(s) attached). Check the inbox and spam folder.")
+                else: st.error(f"Test e-mail failed: {err}")
+
+        st.markdown("---")
         b_lim = st.number_input("Batch Limit", min_value=1, max_value=500, value=min(20, max(1, len(ready_jobs))), key="t6_batch_lim")
         
         c_proc, c_clear = st.columns([1.5, 1])
         with c_proc:
-            if st.button(f"▶️ Process {min(len(ready_jobs), b_lim)} Ready Jobs", type="primary", width="stretch", disabled=(len(ready_jobs)==0)):
+            if st.button(f"▶️ Process {min(len(ready_jobs), b_lim)} Ready Jobs", type="primary", width="stretch", disabled=(len(ready_jobs)==0 or not policy_period_in.strip())):
                 sent = 0
                 for j in ready_jobs[:b_lim]:
                     cards = get_cards_from_db(j["EMP ID"], policy_no=j["Policy"])
@@ -1515,12 +1596,8 @@ with tab_email:
                         encoded_p = urllib.parse.quote(str(j["Policy"]).strip())
                         dynamic_corr_link = f"https://docs.google.com/forms/d/e/1FAIpQLSfMZ0SHY4pr9NVfZwHQRhU6Jmy-vN2K8INePRdkYQarVA_EMw/viewform?usp=pp_url&entry.877007954={encoded_n}&entry.863990631={encoded_eid}&entry.1115400795={encoded_p}"
                         
-                        body = html_in.replace("{{name}}", j["Name"])\
-                                      .replace("{{emp_id}}", j["EMP ID"])\
-                                      .replace("{{company_name}}", active_display_company)\
-                                      .replace("{{policy_no}}", j["Policy"])\
-                                      .replace("{{deadline}}", dline)\
-                                      .replace("{{correction_url}}", dynamic_corr_link)
+                        body = render_welcome_body(html_in, j["Name"], j["EMP ID"], active_display_company, j["Policy"],
+                                                   dline, dynamic_corr_link, policy_period_in, tpa_in)
                                       
                         ok, err = send_multi_ecard_email(j["Email"], subj_in, body, cards)
                         if ok:
