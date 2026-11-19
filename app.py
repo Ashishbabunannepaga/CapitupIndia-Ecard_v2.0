@@ -708,7 +708,7 @@ WELCOME_KIT_TEMPLATE = """<div style="font-family: 'Segoe UI', Arial, sans-serif
       <tr>
         <td style="vertical-align: top; padding: 8px 10px 8px 0; width: 50%;">
           <p style="margin: 0 0 4px 0; font-weight: bold; color: #7A1F2B;">🏥 Cashless (network hospital)</p>
-          <p style="margin: 0; color: #444;">Show your e-card and a photo ID at the hospital's insurance / TPA desk. For a planned admission, inform the insurer <strong>at least 48 hours before</strong>. In an emergency, inform the insurer <strong>within 24 hours</strong> of admission. {{tpa_line}}</p>
+          <p style="margin: 0; color: #444;">Show your e-card and a photo ID at the hospital's insurance / TPA desk. For a planned admission, inform the insurer <strong>at least 48 hours before</strong>. In an emergency, inform the insurer <strong>within 24 hours</strong> of admission. {{tpa_line}} If you need help, call CapitUp (details below).</p>
         </td>
         <td style="vertical-align: top; padding: 8px 0 8px 10px; width: 50%;">
           <p style="margin: 0 0 4px 0; font-weight: bold; color: #7A1F2B;">🧾 Reimbursement</p>
@@ -718,12 +718,18 @@ WELCOME_KIT_TEMPLATE = """<div style="font-family: 'Segoe UI', Arial, sans-serif
     </table>
     <p style="font-size: 13px; margin: 10px 0 0 0;">Find a network hospital near you: <a href="https://www.indusindinsurance.com/about-us/our-network-hospitals/" style="color: #7A1F2B; font-weight: bold;">IndusInd network hospital locator</a></p>
 
-    <h3 style="color: #0B1E30; font-size: 15px; margin: 26px 0 8px 0; border-bottom: 2px solid #C29B38; padding-bottom: 4px;">Need help?</h3>
+    <h3 style="color: #0B1E30; font-size: 15px; margin: 26px 0 8px 0; border-bottom: 2px solid #C29B38; padding-bottom: 4px;">Need help? Contact CapitUp</h3>
     <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-      <tr><td style="width: 40%; font-weight: bold; color: #0B1E30; padding: 3px 0; vertical-align: top;">IndusInd 24x7 helpline:</td><td style="color: #333;">+91 22 4890 3009</td></tr>
-      <tr><td style="font-weight: bold; color: #0B1E30; padding: 3px 0; vertical-align: top;">IndusInd WhatsApp:</td><td style="color: #333;">+91 74004 22200</td></tr>
-      <tr><td style="font-weight: bold; color: #0B1E30; padding: 3px 0; vertical-align: top;">IndusInd e-mail:</td><td style="color: #333;"><a href="mailto:services@indusindinsurance.com" style="color: #7A1F2B;">services@indusindinsurance.com</a></td></tr>
-      <tr><td style="font-weight: bold; color: #0B1E30; padding: 3px 0; vertical-align: top;">Your CapitUp team:</td><td style="color: #333;"><a href="mailto:info@capitupindia.com" style="color: #7A1F2B;">info@capitupindia.com</a> (claims guidance, e-card issues)</td></tr>
+      <tr><td style="width: 40%; font-weight: bold; color: #0B1E30; padding: 4px 0; vertical-align: top;">📞 Call us:</td><td style="color: #333;">+91 97030 82345</td></tr>
+      <tr><td style="font-weight: bold; color: #0B1E30; padding: 4px 0; vertical-align: top;">✉️ Email us:</td><td style="color: #333;"><a href="mailto:info@capitupindia.com" style="color: #7A1F2B;">info@capitupindia.com</a></td></tr>
+      <tr><td style="font-weight: bold; color: #0B1E30; padding: 4px 0; vertical-align: top;">📍 Visit us:</td><td style="color: #333;">4th Floor, HUDA Techno Enclave, HITEC City, Hyderabad-500081</td></tr>
+    </table>
+    <p style="font-size: 13px; font-weight: bold; color: #0B1E30; margin: 18px 0 6px 0;">Escalation matrix (if your query is not resolved)</p>
+    <table style="width: 100%; border-collapse: collapse; font-size: 13px; border: 1px solid #e5e7eb;">
+      <tr style="background-color: #0B1E30; color: #ffffff;"><td style="padding: 6px 10px; font-weight: bold;">Level</td><td style="padding: 6px 10px; font-weight: bold;">Contact</td><td style="padding: 6px 10px; font-weight: bold;">Phone</td></tr>
+      <tr><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">Level 1</td><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">Uday</td><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">+91 99638 03876</td></tr>
+      <tr style="background-color: #F4F6F8;"><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">Level 2</td><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">Syamala G</td><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">+91 94945 46630</td></tr>
+      <tr><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">Level 3</td><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">Sravani</td><td style="padding: 6px 10px; border-top: 1px solid #e5e7eb;">+91 93811 34800</td></tr>
     </table>
 
     <!-- Correction Form Button with Dynamic URL-encoded parameters -->
@@ -736,7 +742,7 @@ WELCOME_KIT_TEMPLATE = """<div style="font-family: 'Segoe UI', Arial, sans-serif
   <!-- FOOTER -->
   <div style="background-color: #F4F6F8; padding: 24px; text-align: center; border-top: 1px solid #e5e7eb;">
     <p style="margin: 0; font-size: 12px; color: #0B1E30; font-weight: bold;">Thank you for being part of the CapitUp Family</p>
-    <p style="margin: 4px 0 0 0; font-size: 10px; color: #888;">CapitUp India Pvt. Ltd. | HITEC City, Hyderabad</p>
+    <p style="margin: 4px 0 0 0; font-size: 10px; color: #888;">CapitUp India Pvt. Ltd. | 4th Floor, HUDA Techno Enclave, HITEC City, Hyderabad-500081</p>
     <p style="margin: 6px 0 0 0; font-size: 9px; color: #999;">Insurance is underwritten by IndusInd General Insurance Company Limited (formerly Reliance General Insurance Company Limited), IRDAI Reg. No. 103. Cover is subject to the terms, conditions and exclusions of your group policy.</p>
   </div>
 </div>"""
